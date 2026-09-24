@@ -1,0 +1,548 @@
+import re
+from datetime import date, datetime, timedelta
+from typing import Optional
+from sqlalchemy.orm import Session
+
+from app.db.models import Checkin, Issue, Profile, RawMessage, User
+from app.agent.stats import compute as compute_stats
+
+CALORIE_FLOOR = {"M": 1500, "F": 1200}
+
+# Plausible ranges for check-in numbers. Anything outside is rejected in code
+# and handed back to the model to ask about, never saved.
+CHECKIN_RANGES = {
+    "weight_kg":   (25, 300,  "kg"),
+    "sleep_hours": (0,  16,   "h"),
+    "energy":      (1,  5,    ""),
+    "calories":    (0,  8000, "kcal"),
+}
+
+LB_TO_KG = 0.4536
+ADULT_AGE = 18
+GOALS = ("lose_fat", "build_muscle", "perform", "feel_better")
+
+_WEIGHT_DESCRIPTION = (
+    "The number exactly as the user gave it. Do not convert: if they gave pounds, "
+    "set weight_unit to lb and code converts."
+)
+_WEIGHT_UNIT = {"type": "string", "enum": ["kg", "lb"], "description": "Unit the user gave. Omit if unclear."}
+
+TOOL_SCHEMAS = [
+    {
+        "name": "log_checkin",
+        "description": (
+            "Save a morning or evening check-in. Use whenever the person reports how they "
+            "are doing today or yesterday, even if only one value is given. "
+            "Do not use when they are only asking about the past."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "is_checkin": {
+                    "type": "boolean",
+                    "description": (
+                        "True only if the message reports check-in data (weight, sleep, training, "
+                        "energy, food or water), or confirms a correction to it. False for requests, "
+                        "questions and chat, e.g. 'set my calories to 1000 a day' is a request, not "
+                        "a check-in. If false, nothing is saved."
+                    ),
+                },
+                "entry_type": {
+                    "type": "string",
+                    "enum": ["morning", "evening"],
+                },
+                "date": {
+                    "type": "string",
+                    "enum": ["today", "yesterday"],
+                    "description": "Omit to default to today.",
+                },
+                "weight_kg":   {"type": "number", "description": _WEIGHT_DESCRIPTION},
+                "weight_unit": _WEIGHT_UNIT,
+                "sleep_hours": {"type": "number"},
+                "training":    {"type": "string", "description": "What they trained or plan to train."},
+                "energy": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 5,
+                    "description": (
+                        "Subjective energy, 1–5. Infer from words when no number is given: "
+                        "exhausted or wrecked = 1, tired or flat = 2, okay = 3, good = 4, great = 5."
+                    ),
+                },
+                "calories":  {"type": "integer"},
+                "protein_g": {"type": "number"},
+                "water_l":   {"type": "number"},
+                "is_correction": {
+                    "type": "boolean",
+                    "description": (
+                        "Set true only after the user has said yes to changing a value "
+                        "already logged today."
+                    ),
+                },
+            },
+            "required": ["is_checkin", "entry_type"],
+        },
+    },
+    {
+        "name": "save_profile",
+        "description": (
+            "Save lasting information: name, age, sex, goal, start weight, injuries, "
+            "calorie/protein targets, disciplines, or trainer. Use during onboarding and "
+            "when the user updates their profile. Not for daily numbers, use log_checkin for those. "
+            "Leave out any field the user did not answer."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "First name only."},
+                "age": {
+                    "type": ["integer", "string"],
+                    "description": "As the user gave it. Words like 'twenty seven' are fine, code converts.",
+                },
+                "sex":  {"type": "string", "enum": ["M", "F"]},
+                "goal": {
+                    "type": "string",
+                    "enum": ["lose_fat", "build_muscle", "perform", "feel_better"],
+                },
+                "start_weight":     {"type": "number", "description": "Current weight. " + _WEIGHT_DESCRIPTION},
+                "weight_unit":      _WEIGHT_UNIT,
+                "disciplines": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "e.g. ['gym', 'running']",
+                },
+                "calorie_target":   {"type": "integer"},
+                "protein_target_g": {"type": "integer"},
+                "issue": {
+                    "type": "string",
+                    "description": (
+                        "An injury or health condition. Pass an empty string only if the user said "
+                        "they have none. That is how the injuries question is marked answered."
+                    ),
+                },
+                "trainer_name": {
+                    "type": "string",
+                    "description": "Their trainer's name. Pass an empty string only if they said they have none.",
+                },
+                "user_confirmed": {
+                    "type": "boolean",
+                    "description": "Must be true when changing a value that was previously saved.",
+                },
+            },
+        },
+    },
+]
+
+
+def dispatch(name: str, inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict:
+    if name == "log_checkin":
+        return _log_checkin(inp, user_id, raw_msg_id, db)
+    if name == "save_profile":
+        return _save_profile(inp, user_id, raw_msg_id, db)
+    return {"error": f"unknown tool: {name}"}
+
+
+def is_adult(age: Optional[int]) -> bool:
+    """None never passes: an unknown age is not an adult age."""
+    return age is not None and age >= ADULT_AGE
+
+
+# ---------------------------------------------------------------------------
+# Number parsing: "27", "twenty seven", "twenty-seven", "180 lbs"
+# ---------------------------------------------------------------------------
+
+_UNITS = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
+    "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    "thirteen": 13, "fourteen": 14, "fifteen": 15, "sixteen": 16,
+    "seventeen": 17, "eighteen": 18, "nineteen": 19,
+}
+_TENS = {
+    "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+    "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+}
+_LB_RE = re.compile(r"\b(lbs?|pounds?)\b", re.I)
+
+
+def parse_number(value) -> Optional[float]:
+    """A number from an int, a float, a digit string or English number words. None if unreadable."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*[a-z]*", text)
+    if m:
+        return float(m.group(1))
+    words = [w for w in re.split(r"[\s-]+", text) if w and w != "and"]
+    if not words:
+        return None
+    total = current = 0
+    for w in words:
+        if w in _UNITS:
+            current += _UNITS[w]
+        elif w in _TENS:
+            current += _TENS[w]
+        elif w == "hundred" and current:
+            current *= 100
+        else:
+            return None
+    return float(total + current)
+
+
+def _to_kg(value, unit: Optional[str], raw_body: str) -> Optional[float]:
+    """Weight in kg. Converts when the unit is lb, or when the model left the unit out,
+    the raw message says lb or pounds and the number is the one the user typed."""
+    if isinstance(value, str) and _LB_RE.search(value):
+        unit = "lb"
+    number = parse_number(value)
+    if number is None:
+        return None
+    if unit is None and _LB_RE.search(raw_body):
+        typed = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", raw_body)]
+        if any(abs(number - n) < 0.01 for n in typed):
+            unit = "lb"
+    if unit == "lb":
+        number *= LB_TO_KG
+    return round(number, 1)
+
+
+# ---------------------------------------------------------------------------
+# log_checkin
+# ---------------------------------------------------------------------------
+
+def _check_range(field: str, value) -> Optional[str]:
+    """Return a rejection reason if value is outside CHECKIN_RANGES, else None."""
+    lo, hi, unit = CHECKIN_RANGES[field]
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return f"{value!r} is not a number."
+    if not lo <= value <= hi:
+        return (
+            f"{value}{unit} is outside the plausible range of {lo} to {hi}{unit}. "
+            "Not saved. Ask the user what they meant."
+        )
+    return None
+
+
+def _log_checkin(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict:
+    user = db.get(User, user_id)
+    if user.blocked or user.onboarding_step < 7 or not is_adult(user.age):
+        return {
+            "saved": False,
+            "error": (
+                "Onboarding is not complete, so check-ins can't be saved yet. Nothing was "
+                "saved. Tell them you need a couple of details first, then ask the next "
+                "onboarding question."
+            ),
+        }
+
+    # Missing counts as false: a check-in has to be declared, so a forced call on a
+    # request like "set my calories to 1000" saves nothing
+    if not inp.get("is_checkin"):
+        return {"saved": False, "reason": "Not a check-in, nothing saved."}
+
+    today = date.today()
+    target_date = today if inp.get("date", "today") == "today" else today - timedelta(days=1)
+    entry_type = inp["entry_type"]
+    is_correction = inp.get("is_correction", False)
+
+    DATA_FIELDS = ("weight_kg", "sleep_hours", "training", "energy", "calories", "protein_g", "water_l")
+    NUDGE_FIELDS = ("weight_kg", "sleep_hours")
+
+    raw_msg = db.get(RawMessage, raw_msg_id)
+    raw_body = raw_msg.body if raw_msg else ""
+
+    inp = dict(inp)
+    rejected: dict = {}
+    if inp.get("weight_kg") is not None:
+        kg = _to_kg(inp["weight_kg"], inp.get("weight_unit"), raw_body)
+        if kg is None:
+            rejected["weight_kg"] = f"{inp['weight_kg']!r} is not a number."
+            del inp["weight_kg"]
+        else:
+            inp["weight_kg"] = kg
+
+    # Range checks before anything else: rejected values are dropped from the input
+    for field in CHECKIN_RANGES:
+        if field in inp and inp[field] is not None:
+            reason = _check_range(field, inp[field])
+            if reason:
+                rejected[field] = reason
+                del inp[field]
+
+    existing = (
+        db.query(Checkin)
+        .filter(
+            Checkin.user_id == user_id,
+            Checkin.date == target_date,
+            Checkin.entry_type == entry_type,
+        )
+        .first()
+    )
+
+    # Never overwrite a value that is already there unless the user said yes to the
+    # change. Empty fields in an existing entry can still be filled in.
+    needs_confirmation: dict = {}
+    if existing and not is_correction:
+        for field in DATA_FIELDS:
+            new, old = inp.get(field), getattr(existing, field)
+            if new is None or old is None or _same(old, new):
+                continue
+            needs_confirmation[field] = {"logged": old, "new": new}
+            del inp[field]
+
+    to_write = {f: inp[f] for f in DATA_FIELDS if inp.get(f) is not None}
+    if existing:
+        to_write = {f: v for f, v in to_write.items() if not _same(getattr(existing, f), v)}
+
+    if not to_write:
+        # Nothing new to save; don't create or touch a row
+        result = {"saved": False, "date": str(target_date), "entry_type": entry_type}
+        if existing and not rejected and not needs_confirmation:
+            result["already_logged"] = True
+        _add_refusals(result, rejected, needs_confirmation)
+        return result
+
+    if existing:
+        overwritten = [f for f in to_write if getattr(existing, f) is not None]
+        for field, value in to_write.items():
+            setattr(existing, field, value)
+        if overwritten:
+            existing.corrected_at = datetime.utcnow()
+            existing.raw_message = raw_body
+        checkin = existing
+    else:
+        checkin = Checkin(
+            user_id=user_id,
+            date=target_date,
+            entry_type=entry_type,
+            raw_message=raw_body,
+            **to_write,
+        )
+        db.add(checkin)
+
+    db.flush()  # populate checkin_id before linking
+
+    # Read from the row, not the input, so a correction that only changes one
+    # field doesn't report the untouched fields as missing. Rejected fields are
+    # reported under "rejected" instead.
+    fields_saved   = list(to_write)
+    fields_missing = [f for f in NUDGE_FIELDS
+                      if getattr(checkin, f) is None and f not in rejected]
+
+    # Record what the model is about to remind them about, so the context block
+    # can list it under "Already asked today" and the bot never asks twice
+    if fields_missing:
+        nudged = set(filter(None, (checkin.nudged_fields or "").split(",")))
+        checkin.nudged_fields = ",".join(sorted(nudged | set(fields_missing)))
+
+    if raw_msg:
+        raw_msg.checkin_id = checkin.checkin_id
+        raw_msg.status = "processed"
+
+    db.commit()
+
+    stats = compute_stats(user_id, db, today)
+
+    result = {
+        "saved": True,
+        "date": str(target_date),
+        "entry_type": entry_type,
+        "fields_saved": fields_saved,
+        "fields_missing": fields_missing,
+        **stats,
+    }
+    _add_refusals(result, rejected, needs_confirmation)
+    return result
+
+
+def _same(old, new) -> bool:
+    if isinstance(old, (int, float)) and isinstance(new, (int, float)):
+        return abs(old - new) < 1e-6
+    return old == new
+
+
+def _add_refusals(result: dict, rejected: dict, needs_confirmation: dict) -> None:
+    if rejected:
+        result["rejected"] = rejected
+    if needs_confirmation:
+        result["needs_confirmation"] = needs_confirmation
+        result["message"] = (
+            "These fields already have a value today and were NOT changed. Ask one short "
+            "yes/no question naming the new value, like 'Update today's weight to 63.0?'. "
+            "Only after they say yes, call log_checkin again with the new value and "
+            "is_correction=true."
+        )
+
+
+# ---------------------------------------------------------------------------
+# save_profile
+# ---------------------------------------------------------------------------
+
+ONBOARDING_LABELS = {
+    0: "name",
+    1: "age",
+    2: "sex",
+    3: "current weight",
+    4: "main goal",
+    5: "injuries or health issues",
+    6: "trainer name",
+}
+
+_SEX_WORDS = {
+    "m": "M", "male": "M", "man": "M", "guy": "M",
+    "f": "F", "female": "F", "woman": "F", "girl": "F",
+}
+
+
+def _profile(user: User, db: Session) -> Profile:
+    # Created on first use, so a user blocked at the age question never gets one
+    if user.profile is None:
+        user.profile = Profile(user_id=user.user_id)
+        db.add(user.profile)
+    return user.profile
+
+
+def _block_minor(user: User, db: Session) -> None:
+    """Under 18: delete everything we hold about them, including every message they
+    sent (the current one too). Only the user row with telegram_chat_id and
+    blocked=true is kept, so they stay blocked."""
+    if user.profile is not None:
+        db.delete(user.profile)
+    for row in list(user.raw_messages) + list(user.issues) + list(user.checkins):
+        db.delete(row)
+    user.name = user.age = user.sex = user.trainer_name = None
+    user.consent_given_at = None
+    user.blocked = True
+    db.commit()
+    db.refresh(user)
+
+
+def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict:
+    user = db.get(User, user_id)
+    if user.blocked:
+        return {"saved": {}, "onboarding_blocked": True}
+
+    raw_msg = db.get(RawMessage, raw_msg_id)
+    raw_body = raw_msg.body if raw_msg else ""
+
+    saved: dict = {}
+    refused: dict = {}
+
+    # Age first, before anything else is written. While the age question is open and
+    # the model passed no age, read a bare answer like "16" or "sixteen" straight
+    # from the message, so an under-18 answer is never missed.
+    age_in = inp.get("age")
+    if age_in in (None, "") and user.onboarding_step == 1:
+        age_in = raw_body if parse_number(raw_body) is not None else None
+    if age_in not in (None, ""):
+        age = parse_number(age_in)
+        if age is None or age != int(age) or not 0 < age < 120:
+            refused["age"] = f"Couldn't read an age from {age_in!r}. Not saved. Ask again."
+        elif not is_adult(int(age)):
+            _block_minor(user, db)
+            return {"saved": {}, "onboarding_blocked": True}
+        else:
+            user.age = int(age)
+            saved["age"] = user.age
+
+    if inp.get("name"):
+        name = inp["name"].strip(" \t!?.,")
+        if not name or len(name) > 40 or any(c.isdigit() for c in name):
+            refused["name"] = f"{inp['name']!r} doesn't look like a first name. Not saved. Ask again."
+        else:
+            user.name = name.title() if name.islower() else name
+            saved["name"] = user.name
+
+    if inp.get("sex"):
+        sex = _SEX_WORDS.get(str(inp["sex"]).strip().lower())
+        if sex is None:
+            refused["sex"] = f"{inp['sex']!r} isn't M or F. Not saved. Ask again."
+        else:
+            user.sex = sex
+            saved["sex"] = sex
+
+    # Calorie floor — enforced in code, model must explain refusal
+    if "calorie_target" in inp:
+        sex = user.sex
+        floor = CALORIE_FLOOR.get(sex, 1200)  # conservative default when sex unknown
+        if inp["calorie_target"] < floor:
+            refused["calorie_target"] = (
+                f"Refused: {inp['calorie_target']} kcal is below the safe minimum "
+                f"of {floor} kcal for {'women' if sex == 'F' else 'men'}. "
+                "Explain this to the user and carry on without setting a calorie target."
+            )
+        else:
+            profile = _profile(user, db)
+            profile.calorie_target = inp["calorie_target"]
+            profile.targets_set_by = "user"
+            saved["calorie_target"] = inp["calorie_target"]
+
+    if inp.get("goal"):
+        if inp["goal"] not in GOALS:
+            refused["goal"] = f"{inp['goal']!r} is not one of {', '.join(GOALS)}. Not saved. Ask again."
+        else:
+            _profile(user, db).goal = inp["goal"]
+            saved["goal"] = inp["goal"]
+
+    if inp.get("start_weight") not in (None, ""):
+        kg = _to_kg(inp["start_weight"], inp.get("weight_unit"), raw_body)
+        reason = _check_range("weight_kg", kg) if kg is not None else "Couldn't read a weight. Not saved. Ask again."
+        if reason:
+            refused["start_weight"] = reason
+        else:
+            _profile(user, db).start_weight = kg
+            saved["start_weight_kg"] = kg
+
+    if "protein_target_g" in inp:
+        _profile(user, db).protein_target_g = inp["protein_target_g"]
+        saved["protein_target_g"] = inp["protein_target_g"]
+
+    if "disciplines" in inp:
+        _profile(user, db).disciplines = ",".join(inp["disciplines"])
+        saved["disciplines"] = inp["disciplines"]
+
+    if "trainer_name" in inp:
+        user.trainer_name = inp["trainer_name"] or None
+        saved["trainer_name"] = inp["trainer_name"]
+
+    if "issue" in inp and inp["issue"]:
+        issue = Issue(user_id=user_id, what=inp["issue"])
+        db.add(issue)
+        saved["issue"] = inp["issue"]
+
+    # Advance onboarding step past every question whose answer is now saved and valid.
+    # Steps 5 and 6 are "asked" steps — they advance when the key is present in inp
+    # (even empty string), meaning the question was answered even if the answer was "none".
+    profile = user.profile
+    step = user.onboarding_step
+    while step < 7:
+        if   step == 0 and user.name:
+            step = 1
+        elif step == 1 and is_adult(user.age):
+            step = 2
+        elif step == 2 and user.sex:
+            step = 3
+        elif step == 3 and profile and profile.start_weight:
+            step = 4
+        elif step == 4 and profile and profile.goal:
+            step = 5
+        elif step == 5 and "issue" in inp:
+            step = 6
+        elif step == 6 and "trainer_name" in inp:
+            step = 7
+        else:
+            break
+
+    user.onboarding_step = step
+    db.commit()
+
+    return {
+        "saved": saved,
+        "refused": refused,
+        "onboarding_step": step,
+        "next_question": ONBOARDING_LABELS.get(step),
+        "onboarding_complete": step >= 7,
+    }
