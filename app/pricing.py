@@ -9,18 +9,19 @@ default ephemeral cache).
 """
 from typing import Optional
 
+# From https://platform.claude.com/docs/en/about-claude/pricing on 25 Sep 2026
 PRICES: dict[str, dict[str, Optional[float]]] = {
     "claude-haiku-4-5-20251001": {
-        "input": None,
-        "output": None,
-        "cache_read": None,
-        "cache_write": None,
+        "input": 1.00,
+        "output": 5.00,
+        "cache_read": 0.10,
+        "cache_write": 1.25,
     },
     "claude-sonnet-5": {
-        "input": None,
-        "output": None,
-        "cache_read": None,
-        "cache_write": None,
+        "input": 2.00,
+        "output": 10.00,
+        "cache_read": 0.20,
+        "cache_write": 2.50,
     },
 }
 
