@@ -68,8 +68,10 @@ def compute(user_id: int, db: Session, today: date) -> dict:
     days_logged_7 = len(dates & last_7)
     energies = [c.energy for c in checkins if c.energy is not None and c.date in last_7]
     avg_energy = sum(energies) / len(energies) if energies else None
+    # Logging rarely only means something once they've had a full week to log;
+    # low energy and short sleep count from day one
     struggling = (
-        days_logged_7 <= 2
+        (days_since_joined >= 7 and days_logged_7 <= 2)
         or (avg_energy is not None and avg_energy < 2.5)
         or short_sleep >= 3
     )

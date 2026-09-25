@@ -946,10 +946,31 @@ def _code_kg_milestone(db) -> CheckResult:
     return not wrong, f"wrong: {wrong}"
 
 
+def _code_user_state(db) -> CheckResult:
+    """Few days logged only counts after a week; low energy and short sleep count at once."""
+    new_user = _onboarded_user(db)
+    db.add(Checkin(user_id=new_user, date=date.today(), entry_type="morning", energy=4,
+                   sleep_hours=7.5, raw_message="energy 4 slept 7.5"))
+    db.commit()
+    new_state = compute_stats(new_user, db, date.today())["user_state"]
+
+    low_user = _onboarded_user(db)
+    user = db.get(User, low_user)
+    user.joined_at -= timedelta(days=3)
+    for days_ago, energy, sleep in ((2, 2, 5.0), (1, 2, 5.5), (0, 1, 5.0)):
+        db.add(Checkin(user_id=low_user, date=date.today() - timedelta(days=days_ago),
+                       entry_type="morning", energy=energy, sleep_hours=sleep, raw_message="low"))
+    db.commit()
+    low_state = compute_stats(low_user, db, date.today())["user_state"]
+    ok = new_state == "normal" and low_state == "struggling"
+    return ok, f"1-day-old, energy 4: {new_state}; 3-day-old, energy 1-2, short sleep: {low_state}"
+
+
 CODE_CHECKS = [
     ("31st open note is refused", _code_notes_cap),
     ("notes refuse injuries, past follow-ups, other users' ids", _code_note_rules),
     ("1kg milestone uses goal direction and 3 weigh-in average", _code_kg_milestone),
+    ("new user isn't struggling; low energy and short sleep is from day one", _code_user_state),
 ]
 
 
