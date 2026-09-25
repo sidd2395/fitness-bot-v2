@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.db.models import RawMessage, User
 from app.agent.tools import ONBOARDING_STEPS, TOOL_SCHEMAS, dispatch
 from app.agent.context import build_system_prompt
+from app.pricing import usage_counts
 
 load_dotenv()
 
@@ -300,12 +301,21 @@ def _call(model: str, user_id: int, system: list, messages: list,
     # so an empty reply can be traced to its cause
     blocks = ",".join(b.type for b in response.content) or "none"
     _log("model_call", user_id, f"model={model} stop={response.stop_reason} blocks={blocks}")
+    _record_usage(user_id, model, response.usage)
     if any(b.type in ("thinking", "redacted_thinking") for b in response.content):
         # Thinking is disabled on every call, so this shouldn't happen. The
         # request id lets Anthropic look the call up.
         logger.warning("event=unexpected_thinking user_id=%d model=%s request_id=%s",
                        user_id, model, getattr(response, "_request_id", None))
     return response
+
+
+def _record_usage(user_id: int, model: str, usage) -> None:
+    """Token counts for one call, for cost tracking. Prices live in app/pricing.py."""
+    c = usage_counts(usage)
+    _log("usage", user_id,
+         f"model={model} input={c['input_tokens']} output={c['output_tokens']} "
+         f"cache_read={c['cache_read_input_tokens']} cache_write={c['cache_creation_input_tokens']}")
 
 
 def _run_tools(response, user_id: int, raw_msg_id: int, db: Session,

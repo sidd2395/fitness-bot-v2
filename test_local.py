@@ -62,6 +62,7 @@ from app.agent.loop import (  # noqa: E402
 )
 from app.agent.stats import compute as compute_stats, reached_milestones  # noqa: E402
 from app.agent.tools import MAX_OPEN_NOTES, ONBOARDING_STEPS, dispatch  # noqa: E402
+from app.pricing import PRICES, cost_usd, usage_counts  # noqa: E402
 
 # Every tool call in the current message, so checks can see what was refused
 _TOOL_LOG: list = []
@@ -81,6 +82,18 @@ def _recording_dispatch(name, inp, user_id, raw_msg_id, db):
 
 
 agent_loop.dispatch = _recording_dispatch
+
+# Token counts for every model call in the current message: (model, counts)
+_USAGE_LOG: list = []
+_real_record_usage = agent_loop._record_usage
+
+
+def _recording_usage(user_id, model, usage):
+    _real_record_usage(user_id, model, usage)
+    _USAGE_LOG.append((model, usage_counts(usage)))
+
+
+agent_loop._record_usage = _recording_usage
 
 
 # --------------------------------------------------------------------------- #
@@ -117,6 +130,7 @@ class Sent:
     follow_up_due: bool = False      # a note's follow-up was due when it was sent
     day: int = 0                     # days advanced in the test when it was sent
     tools: list = field(default_factory=list)   # (name, input, result) per tool call
+    usage: list = field(default_factory=list)   # (model, token counts) per model call
 
     @property
     def checkin_saved(self) -> bool:
@@ -167,12 +181,13 @@ def send(ctx: Ctx, message: str) -> None:
     struggling = onboarded and _struggling(ctx)
     before = len(_checkins(ctx))
     _TOOL_LOG.clear()
+    _USAGE_LOG.clear()
     reply = run(ctx.user_id, message, ctx.db)
     struggling = struggling or (onboarded and _struggling(ctx))
     ctx.sent.append(Sent(message, reply, onboarded, new_checkin=len(_checkins(ctx)) > before,
                          active_issue=active_issue, struggling=struggling,
                          follow_up_due=follow_up_due, day=ctx.marks.get("days_advanced", 0),
-                         tools=list(_TOOL_LOG)))
+                         tools=list(_TOOL_LOG), usage=list(_USAGE_LOG)))
     print(textwrap.indent(reply or "(empty reply)", "<<< ", lambda _: True))
 
 
@@ -998,6 +1013,10 @@ def run_code_checks() -> list[tuple[str, str, bool, str]]:
 # Runner                                                                        #
 # --------------------------------------------------------------------------- #
 
+# Every persona's messages, kept for the cost summary
+SENT_BY_PERSONA: dict = {}
+
+
 def run_persona(p: Persona) -> list[tuple[str, str, bool, str]]:
     print("\n" + "=" * 70)
     print(f"{p.name.upper()}: {p.summary}")
@@ -1018,6 +1037,7 @@ def run_persona(p: Persona) -> list[tuple[str, str, bool, str]]:
     finally:
         db.close()
 
+    SENT_BY_PERSONA[p.name] = ctx.sent
     rows = []
     if error:
         rows.append((p.name, "ran without errors", False, error))
@@ -1051,6 +1071,73 @@ def print_table(rows: list[tuple[str, str, bool, str]]) -> None:
         print(f"{persona:<{w_p}}  {label:<{w_c}}  {result}")
     passed = sum(r[2] for r in rows)
     print(f"\n{passed}/{len(rows)} passed")
+
+
+# --------------------------------------------------------------------------- #
+# Cost summary                                                                  #
+# --------------------------------------------------------------------------- #
+
+def _usd(value) -> str:
+    return "n/a" if value is None else f"${value:.4f}"
+
+
+def _message_cost(s: Sent, missing: set):
+    """Cost of every model call a message made. None if any call has no price."""
+    total = 0.0
+    for model, counts in s.usage:
+        c = cost_usd(model, counts)
+        if c is None:
+            missing.add(model)
+            return None
+        total += c
+    return total
+
+
+def _sum(costs: list):
+    return None if any(c is None for c in costs) else sum(costs)
+
+
+def print_cost_summary() -> None:
+    print("\n" + "=" * 70)
+    print("COST")
+    print("=" * 70)
+    missing: set = set()
+    persona_costs, onboardings, coaching = {}, [], []
+    tokens: dict = {}   # model -> summed counts
+
+    for name, sent in SENT_BY_PERSONA.items():
+        costs = [_message_cost(s, missing) for s in sent]
+        persona_costs[name] = _sum(costs)
+        # A persona's onboarding is every message sent before it completed;
+        # counted only for personas that finished it
+        onboarding = [c for s, c in zip(sent, costs) if not s.onboarded_before and s.usage]
+        if any(s.reply == ONBOARDED_REPLY for s in sent):
+            onboardings.append(_sum(onboarding))
+        coaching += [c for s, c in zip(sent, costs) if s.onboarded_before and s.usage]
+        for s in sent:
+            for model, counts in s.usage:
+                acc = tokens.setdefault(model, dict.fromkeys(counts, 0))
+                for k, v in counts.items():
+                    acc[k] += v
+
+    print(f"Total: {_usd(_sum(list(persona_costs.values())))}")
+    print("\nPer persona:")
+    for name, c in persona_costs.items():
+        print(f"  {name:<10} {_usd(c)}")
+    avg = lambda xs: None if not xs or any(x is None for x in xs) else sum(xs) / len(xs)  # noqa: E731
+    print(f"\nAverage per onboarding ({len(onboardings)} completed): {_usd(avg(onboardings))}")
+    print(f"Average per coaching message ({len(coaching)} messages): {_usd(avg(coaching))}")
+
+    print("\nCache hit rate (cache reads / all input tokens):")
+    for model, t in tokens.items():
+        prompt = t["input_tokens"] + t["cache_read_input_tokens"] + t["cache_creation_input_tokens"]
+        rate = t["cache_read_input_tokens"] / prompt if prompt else 0.0
+        print(f"  {model}: {rate:.1%}  (input {t['input_tokens']}, cache read "
+              f"{t['cache_read_input_tokens']}, cache write {t['cache_creation_input_tokens']}, "
+              f"output {t['output_tokens']})")
+    if missing:
+        print(f"\nNo price set in app/pricing.py for: {', '.join(sorted(missing))}. "
+              "Costs that need them show n/a.")
 
 
 class Tee:
@@ -1102,6 +1189,7 @@ def main() -> None:
         rows.extend(run_persona(p))
 
     print_table(rows)
+    print_cost_summary()
     sys.stdout.flush()
     sys.stdout = sys.__stdout__
     out.close()

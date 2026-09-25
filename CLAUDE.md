@@ -19,6 +19,9 @@ in phase 2 and isn't in requirements.txt yet.
 - `app/agent/stats.py`: numbers computed in code for the context block, and
   milestones (reached in code, stored in `milestones` so each fires once).
 - `app/agent/prompts/coach.md`: the coach's voice.
+- `app/pricing.py`: price per million tokens for each model (input, output,
+  cache read, cache write). Every model call logs its token counts
+  (`event=usage`); `test_local.py` ends with a cost summary from these.
 - `app/db/`: models (incl. `notes`, `milestones`), session, `delete_user`.
 - `alembic/versions/`: migrations. The test DB is built from these.
 - `test_local.py`: persona tests with real model calls, against `test.db`.
