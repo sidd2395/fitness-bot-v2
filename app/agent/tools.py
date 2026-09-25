@@ -427,7 +427,7 @@ def _log_checkin(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict:
                       if all(getattr(c, f) is None for c in same_day) and f not in rejected]
 
     # Record what the model is about to remind them about, so the context block
-    # can list it under "Already asked today" and the bot never asks twice
+    # can list it under "Fields already reminded about today" and the bot never asks twice
     if fields_missing:
         nudged = set(filter(None, (checkin.nudged_fields or "").split(",")))
         checkin.nudged_fields = ",".join(sorted(nudged | set(fields_missing)))
@@ -450,7 +450,13 @@ def _log_checkin(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict:
         **stats,
     }
     if milestone:
-        result["milestone_today"] = f"{milestone}. Mention it once, briefly."
+        # With an active issue there's usually a safety point to make first, so the
+        # ordering rule goes where the model reads the milestone
+        if any(i.status == "active" for i in user.issues):
+            result["milestone_today"] = (f"{milestone}. Mention it once, briefly, at the END of "
+                                         "the reply, after any safety point.")
+        else:
+            result["milestone_today"] = f"{milestone}. Mention it once, briefly."
     # Weight saved: the change since the previous weigh-in, computed here
     if "weight_kg" in fields_saved:
         change = weight_change_since_last(user_id, db, target_date)

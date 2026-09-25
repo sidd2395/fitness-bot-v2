@@ -56,7 +56,7 @@ from app.db.session import SessionLocal, engine  # noqa: E402
 from app.db.models import Base, Checkin, Milestone, Note, Profile, RawMessage, User  # noqa: E402
 from app.db import delete_user  # noqa: E402
 from app.agent import loop as agent_loop  # noqa: E402
-from app.agent.context import asks_for_checkin, checkin_request_line  # noqa: E402
+from app.agent.context import asks_for_checkin, checkin_asks, checkin_request_line  # noqa: E402
 from app.agent.loop import (  # noqa: E402
     BLOCKED_REPLY, MODEL_COACH, MODEL_ONBOARDING, ONBOARDED_REPLY, WELCOME_REPLY, run,
 )
@@ -499,11 +499,17 @@ def _priya_no_repeat(ctx: Ctx) -> CheckResult:
 _PRIYA_DAY_2 = "63.1 slept 7h legs today"
 
 
+# "down/lost/dropped" tied to yesterday's 62.6 or the 0.5 change. "Down from 63.5
+# since you started" is true (start weight) and allowed.
+_PRIYA_WRONG_DOWN = re.compile(
+    r"\b(down|lost|dropped|lighter)\b\W+(?:\w+\W+){0,2}?(62\.6|0\.5|half a (kilo|kg))", re.I)
+
+
 def _priya_day2_direction(ctx: Ctx) -> CheckResult:
-    """62.6 -> 63.1 is up: the day-2 reply mustn't call it down."""
+    """62.6 -> 63.1 is up: the day-2 reply mustn't say the change since yesterday went down."""
     reply = _reply(ctx, _PRIYA_DAY_2)
-    hits = re.findall(r"\b(down|lost|dropped)\b", reply, re.I)
-    return bool(reply) and not hits, f"found {hits} in reply: {reply!r}"
+    hit = _PRIYA_WRONG_DOWN.search(reply)
+    return bool(reply) and not hit, f"found {hit and hit.group(0)!r} in reply: {reply!r}"
 
 
 def _priya_milestone_stored(ctx: Ctx) -> CheckResult:
@@ -634,10 +640,21 @@ def _nadia_no_prompt_leak(ctx: Ctx) -> CheckResult:
     return not leaked, f"leaked on: {leaked}"
 
 
-def _nadia_asked_once(ctx: Ctx) -> CheckResult:
-    """After onboarding, at most one reply asks her for a check-in."""
-    asks = [s.message for s in ctx.sent if s.onboarded_before and asks_for_checkin(s.reply)]
-    return len(asks) <= 1, f"check-in asked in replies to: {asks}"
+def _nadia_checkin_asks(ctx: Ctx) -> CheckResult:
+    """Before her first ever check-in: at most one invitation per reply. After it:
+    at most one reply a day asks for a check-in."""
+    bad, asked_days, logged = [], {}, False
+    for s in ctx.sent:
+        if not s.onboarded_before:
+            continue
+        if not logged:
+            if checkin_asks(s.reply) > 1:
+                bad.append((s.message, f"{checkin_asks(s.reply)} invitations before first check-in"))
+        elif asks_for_checkin(s.reply):
+            asked_days.setdefault(s.day, []).append(s.message)
+        logged = logged or s.checkin_saved
+    bad += [(msgs, f"asked {len(msgs)} times on day {d}") for d, msgs in asked_days.items() if len(msgs) > 1]
+    return not bad, f"{bad}"
 
 
 def _maya_motivation(ctx: Ctx) -> CheckResult:
@@ -758,7 +775,7 @@ PERSONAS = [
             ("weight ends at 62.6 with corrected_at", _priya_final_weight),
             ("first check-in reply marks it as her first", _priya_first_milestone),
             ("next day's check-in reply doesn't repeat it", _priya_no_repeat),
-            ("day-2 reply (62.6 -> 63.1) doesn't say down, lost or dropped", _priya_day2_direction),
+            ("day-2 reply doesn't say the change since 62.6 went down", _priya_day2_direction),
             ("first check-in milestone stored once, can't fire again", _priya_milestone_stored),
             ("sleep 7.5", _priya_field("sleep_hours", 7.5)),
             ("energy 4", _priya_field("energy", 4)),
@@ -867,7 +884,7 @@ PERSONAS = [
             ("no check-ins from last four messages", _nadia_no_new_checkins),
             ("all raw messages processed with reply", all_raw_processed),
             ("no reply contains RULES or COACHING", _nadia_no_prompt_leak),
-            ("at most one reply asks for a check-in", _nadia_asked_once),
+            ("one invitation per reply before first check-in, then once a day", _nadia_checkin_asks),
         ],
     ),
     Persona(

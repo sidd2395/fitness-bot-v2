@@ -44,7 +44,7 @@ value and is_correction=true. If they say no, leave it as it is.
 language and carry on without setting a target.
 - Never ask for anything already listed under PROFILE: name, age, sex, goal \
 or weight.
-- Never ask about a field listed under "Already asked today".
+- Never ask about a field listed under "Fields already reminded about today".
 - remember: save things that will matter in later conversations: schedule, \
 travel, events, likes and dislikes, work or family context that affects \
 training. One fact per note, short and specific. If there's something worth \
@@ -54,11 +54,13 @@ and health issues (save_profile issue). Don't save what is already under NOTES.
 - When FOLLOW-UPS DUE lists a note, ask about it naturally in this reply and \
 call resolve_note with its id in the same turn, so you only ask once. Also \
 resolve a note when they tell you it's no longer true.
-- Check-in requests: the context block has one line about this. If it says \
-"Already asked today", do not ask for a check-in again, and don't end with an \
-invitation to log. Only when it says "Check-in requested today: no" and \
-nothing is logged today may you ask, once. Never ask for one in a reply to \
-thanks, small talk, or a message that isn't about their training.\
+- Check-in requests: the context block has one line about this, and it \
+decides. "No check-in yet": before their first ever check-in, one gentle \
+invitation to send it is fine, at most one per reply. "Already asked today": \
+do not ask for a check-in again, and don't end with an invitation to log. \
+"Check-in requested today: no": you may ask once today if nothing is logged \
+yet, never in a reply to thanks, small talk, or a message that isn't about \
+their training.\
 """
 
 # --------------------------------------------------------------------------- #
@@ -242,11 +244,14 @@ def _context_block(user: User, db: Session) -> str:
     lines.append(f"State: {s['user_state']}.")
     # Stored as it's handed over, so it shows on this turn only
     milestone = claim_milestone(user.user_id, db, today)
-    if milestone:
+    if milestone and active_issues:
+        lines.append(f"Milestone today: {milestone}. Mention it once, briefly, at the END of "
+                     "the reply, after any safety point.")
+    elif milestone:
         lines.append(f"Milestone today: {milestone}. Mention it once, briefly.")
 
-    # Already asked today: fields the bot has already reminded them about today,
-    # recorded by log_checkin in nudged_fields. The model must not ask again.
+    # Fields the bot has already reminded them about today, recorded by
+    # log_checkin in nudged_fields. The model must not ask again.
     _LABELS = {"weight_kg": "weight", "sleep_hours": "sleep"}
     asked = sorted({
         _LABELS.get(field, field)
@@ -254,7 +259,7 @@ def _context_block(user: User, db: Session) -> str:
         for field in (c.nudged_fields or "").split(",")
         if field
     })
-    lines.append(f"Already asked today: {', '.join(asked) if asked else 'nothing'}.")
+    lines.append(f"Fields already reminded about today: {', '.join(asked) if asked else 'nothing'}.")
     # Whether any reply today (the "all set" reply included) asked for a check-in
     lines.append(checkin_request_line(user.user_id, today, db))
 
@@ -305,16 +310,24 @@ _ASK_VERB = re.compile(
 _ASK_WHAT = re.compile(r"\b(check[- ]?ins?|weigh[- ]?ins?|weight|sleep|slept|numbers)\b", re.I)
 
 
+def checkin_asks(text: str) -> int:
+    """How many sentences in the text ask them to send check-in data."""
+    return sum(1 for sentence in re.split(r"(?<=[.!?])\s+|\n+", text or "")
+               if _ASK_VERB.search(sentence) and _ASK_WHAT.search(sentence))
+
+
 def asks_for_checkin(text: str) -> bool:
     """True if any sentence in the text asks them to send check-in data."""
-    for sentence in re.split(r"(?<=[.!?])\s+|\n+", text or ""):
-        if _ASK_VERB.search(sentence) and _ASK_WHAT.search(sentence):
-            return True
-    return False
+    return checkin_asks(text) > 0
 
 
 def checkin_request_line(user_id: int, today: date, db: Session) -> str:
-    """The context block's line about asking for a check-in, with its rule."""
+    """The context block's line about asking for a check-in, with its rule.
+    Before the first ever check-in, a gentle invitation in each reply is fine;
+    after it, at most one ask a day."""
+    if db.query(Checkin.checkin_id).filter(Checkin.user_id == user_id).first() is None:
+        return ("No check-in yet: one gentle invitation to send their first is fine, "
+                "at most one per reply.")
     if _checkin_requested_today(user_id, today, db):
         return ("Already asked today: do not ask for a check-in again, and don't end "
                 "with an invitation to log.")
