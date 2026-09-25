@@ -14,9 +14,16 @@ def compute(user_id: int, db: Session, today: date) -> dict:
     )
     dates = {c.date for c in checkins}
 
-    # "X of last 14" — participation rate, matching spec context-block format
+    # "X of last 14": how often they log. Not a streak.
     last_14 = {today - timedelta(days=i) for i in range(14)}
-    streak = len(dates & last_14)
+    days_logged_14 = len(dates & last_14)
+
+    # A streak is consecutive days only, counted back from today (or from
+    # yesterday if nothing is logged yet today). Any gap resets it.
+    run_end = today if today in dates else today - timedelta(days=1)
+    days_in_a_row = 0
+    while run_end - timedelta(days=days_in_a_row) in dates:
+        days_in_a_row += 1
 
     # Days since joined
     user = db.get(User, user_id)
@@ -68,7 +75,8 @@ def compute(user_id: int, db: Session, today: date) -> dict:
     )
 
     return {
-        "streak": streak,
+        "days_logged_last_14": days_logged_14,
+        "days_in_a_row": days_in_a_row,
         "days_since_joined": days_since_joined,
         "days_since_last_checkin": days_since_last,
         "weight_change_7d": weight_change_7d,

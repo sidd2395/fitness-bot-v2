@@ -55,7 +55,8 @@ and health issues (save_profile issue). Don't save what is already under NOTES.
 call resolve_note with its id in the same turn, so you only ask once. Also \
 resolve a note when they tell you it's no longer true.
 - Ask them for a check-in at most once a day: only when the context block says \
-"Check-in requested today: no" and nothing is logged today. Never ask for one \
+"Check-in requested today: no" and nothing is logged today. If it says you \
+already asked, do not ask again, not even as a closing line. Never ask for one \
 in a reply to thanks, small talk, or a message that isn't about their training.\
 """
 
@@ -80,7 +81,8 @@ in pounds, pass the pounds number with weight_unit "lb". Code converts.
 context block says which one. Never ask for something already saved.
 - If they ask about something else, say briefly it isn't your area and ask \
 the current question again.
-- Ask one question per message only. Don't open with their name.
+- One question per message, in one sentence with one question mark. Don't \
+open with their name.
 
 Questions, in order:
 1. name: Ask for their first name only.
@@ -89,9 +91,10 @@ Questions, in order:
 similar.
 4. current weight: Ask for their current weight. Kilograms or pounds are \
 both fine.
-5. main goal: Ask for their main goal: lose fat, build muscle, perform \
-better, or feel better. Accept natural language and map it to lose_fat, \
-build_muscle, perform or feel_better.
+5. main goal: Ask for their main goal, listing the four options in the same \
+sentence as the question, with a single question mark at the end: lose fat, \
+build muscle, perform better or feel better. Accept natural language and \
+map it to lose_fat, build_muscle, perform or feel_better.
 6. why they're starting now: Ask what made them want to start now. Any \
 answer is fine. Save a short version in their own words as motivation. If \
 they aren't sure, call save_profile with motivation="" and move on.
@@ -209,9 +212,17 @@ def _context_block(user: User, db: Session) -> str:
     lines.append("")
     lines.append("WHERE THEY ARE")
     lines.append(
-        f"Streak: {s['streak']} of last 14. "
+        f"Logged {s['days_logged_last_14']} of the last 14 days. "
         f"Day {s['days_since_joined']} since joining."
     )
+    # The only streak figure the coach may use. After a gap there is none.
+    if s["days_in_a_row"] >= 2:
+        lines.append(f"Days in a row: {s['days_in_a_row']}.")
+    else:
+        lines.append("Days in a row: none, so don't call anything a streak.")
+    if s["days_since_last_checkin"] and s["days_since_last_checkin"] > 1:
+        lines.append(f"Back after a gap: last check-in before today was "
+                     f"{s['days_since_last_checkin']} days ago.")
     if s["weight_change_7d"] is not None:
         delta = s["weight_change_7d"]
         sign = "+" if delta > 0 else ""
@@ -236,8 +247,10 @@ def _context_block(user: User, db: Session) -> str:
     })
     lines.append(f"Already asked today: {', '.join(asked) if asked else 'nothing'}.")
     # Whether any reply today (the "all set" reply included) asked for a check-in
-    requested = "yes, don't ask again today" if _checkin_requested_today(user.user_id, today, db) else "no"
-    lines.append(f"Check-in requested today: {requested}.")
+    if _checkin_requested_today(user.user_id, today, db):
+        lines.append("You already asked for a check-in today. Do not ask again.")
+    else:
+        lines.append("Check-in requested today: no.")
 
     # --- Notes: long-term memory, written by the remember tool -------------- #
     open_notes = (

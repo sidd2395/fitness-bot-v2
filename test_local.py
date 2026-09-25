@@ -60,16 +60,23 @@ from app.agent.context import asks_for_checkin  # noqa: E402
 from app.agent.loop import (  # noqa: E402
     BLOCKED_REPLY, MODEL_COACH, MODEL_ONBOARDING, ONBOARDED_REPLY, WELCOME_REPLY, run,
 )
-from app.agent.stats import reached_milestones  # noqa: E402
+from app.agent.stats import compute as compute_stats, reached_milestones  # noqa: E402
 from app.agent.tools import MAX_OPEN_NOTES, ONBOARDING_STEPS, dispatch  # noqa: E402
 
 # Every tool call in the current message, so checks can see what was refused
 _TOOL_LOG: list = []
 
 
+_RESULT_KEYS = ("saved", "refused", "rejected", "needs_confirmation", "error", "onboarding_step",
+                "milestone_today", "resolved", "note_id")
+
+
 def _recording_dispatch(name, inp, user_id, raw_msg_id, db):
     result = dispatch(name, inp, user_id, raw_msg_id, db)
     _TOOL_LOG.append((name, dict(inp), result))
+    # Test transcript only (synthetic data): what the model sent and what came back
+    brief = {k: result[k] for k in _RESULT_KEYS if result.get(k) not in (None, {}, [])}
+    print(f"    · {name} {dict(inp)} -> {brief}")
     return result
 
 
@@ -106,6 +113,9 @@ class Sent:
     onboarded_before: bool           # onboarding was already complete when it was sent
     new_checkin: bool = False        # the message created a new check-in row
     active_issue: bool = False       # they had an active issue when it was sent
+    struggling: bool = False         # user_state was struggling before or after the turn
+    follow_up_due: bool = False      # a note's follow-up was due when it was sent
+    day: int = 0                     # days advanced in the test when it was sent
     tools: list = field(default_factory=list)   # (name, input, result) per tool call
 
     @property
@@ -152,15 +162,26 @@ def send(ctx: Ctx, message: str) -> None:
     ctx.db.refresh(user)
     onboarded = user.onboarding_step >= ONBOARDING_STEPS
     active_issue = any(i.status == "active" for i in user.issues)
+    follow_up_due = any(n.follow_up_on and n.follow_up_on <= date.today() and not n.resolved
+                        for n in user.notes)
+    struggling = onboarded and _struggling(ctx)
     before = len(_checkins(ctx))
     _TOOL_LOG.clear()
     reply = run(ctx.user_id, message, ctx.db)
+    struggling = struggling or (onboarded and _struggling(ctx))
     ctx.sent.append(Sent(message, reply, onboarded, new_checkin=len(_checkins(ctx)) > before,
-                         active_issue=active_issue, tools=list(_TOOL_LOG)))
+                         active_issue=active_issue, struggling=struggling,
+                         follow_up_due=follow_up_due, day=ctx.marks.get("days_advanced", 0),
+                         tools=list(_TOOL_LOG)))
     print(textwrap.indent(reply or "(empty reply)", "<<< ", lambda _: True))
 
 
 # Read helpers. Checks get a fresh session so they see only committed state.
+
+def _struggling(ctx: Ctx) -> bool:
+    ctx.db.expire_all()
+    return compute_stats(ctx.user_id, ctx.db, date.today())["user_state"] == "struggling"
+
 
 def _user(ctx: Ctx):
     return ctx.db.get(User, ctx.user_id)
@@ -249,6 +270,7 @@ def _shift_back(ctx: Ctx, n: int) -> None:
     for m in u.milestones:
         m.reached_on -= d
     ctx.db.commit()
+    ctx.marks["days_advanced"] = ctx.marks.get("days_advanced", 0) + n
     print(f"\n[{n} day(s) later]")
 
 
@@ -280,7 +302,7 @@ def no_profile_questions_after_onboarding(ctx: Ctx) -> CheckResult:
     for s in ctx.sent:
         if not s.onboarded_before:
             continue
-        questions = [q for q in re.findall(r"[^.!?\n]*\?", s.reply) if _PROFILE_QUESTION.search(q)]
+        questions = [q for q in _questions(s.reply) if _PROFILE_QUESTION.search(q)]
         if questions:
             bad.append((s.message, questions))
     return not bad, f"asked: {bad}"
@@ -289,6 +311,11 @@ def no_profile_questions_after_onboarding(ctx: Ctx) -> CheckResult:
 def no_empty_replies(ctx: Ctx) -> CheckResult:
     bad = [s.message for s in ctx.sent if not s.reply.strip()]
     return not bad, f"empty reply to: {bad}"
+
+
+def _questions(text: str) -> list[str]:
+    """Each question sentence. A full stop between digits (62.6) doesn't end a sentence."""
+    return re.findall(r"(?:[^.!?\n]|\.(?=\d))*\?", text)
 
 
 def _words(text: str) -> list[str]:
@@ -341,13 +368,21 @@ def checkin_replies_not_too_short(ctx: Ctx) -> CheckResult:
 
 
 def short_checkin_short_reply(ctx: Ctx) -> CheckResult:
-    """A check-in of 8 words or fewer gets a reply of 60 words or fewer. Skipped when
-    an active issue applies or a tool refused something: a safety point or a refusal
-    always gets the room it needs."""
+    """A check-in of 8 words or fewer gets a reply of 80 words or fewer. Skipped when
+    an active issue applies, a tool refused something, they're struggling, or a
+    follow-up is due: those get the room they need."""
     bad = [(s.message, len(_words(s.reply))) for s in ctx.sent
            if s.onboarded_before and s.checkin_saved and len(_words(s.message)) <= 8
-           and not s.active_issue and not s.refused and len(_words(s.reply)) > 60]
+           and not (s.active_issue or s.refused or s.struggling or s.follow_up_due)
+           and len(_words(s.reply)) > 80]
     return not bad, f"(message, words): {bad}"
+
+
+def no_checkin_during_onboarding(ctx: Ctx) -> CheckResult:
+    """Nothing sent before onboarding completed saved a check-in."""
+    bad = [s.message for s in ctx.sent
+           if not s.onboarded_before and (s.new_checkin or s.checkin_saved)]
+    return not bad, f"check-in saved during onboarding from: {bad}"
 
 
 def one_question_at_most(ctx: Ctx) -> CheckResult:
@@ -363,7 +398,8 @@ COMMON_CHECKS = [
     ("no 6-word run copied from coach.md examples", no_copied_examples),
     ("welcome and all-set replies stored", fixed_replies_stored),
     ("every check-in reply is at least 15 words", checkin_replies_not_too_short),
-    ("check-in of 8 words or fewer gets 60 words or fewer", short_checkin_short_reply),
+    ("check-in of 8 words or fewer gets 80 words or fewer", short_checkin_short_reply),
+    ("no check-in saved before onboarding completes", no_checkin_during_onboarding),
     ("no reply has more than one question mark", one_question_at_most),
 ]
 
@@ -372,12 +408,20 @@ COMMON_CHECKS = [
 # Personas                                                                      #
 # --------------------------------------------------------------------------- #
 
-def _priya_final_weight(ctx: Ctx) -> CheckResult:
+def _mark_after_yes(ctx: Ctx) -> None:
+    ctx.db.expire_all()
     c = _latest_weighed(ctx)
-    if c is None:
+    ctx.marks["after_yes"] = (c.weight_kg, c.corrected_at) if c else None
+    print(f"\n[after_yes: {ctx.marks['after_yes']}]")
+
+
+def _priya_final_weight(ctx: Ctx) -> CheckResult:
+    mark = ctx.marks.get("after_yes")
+    if mark is None:
         return False, "no check-in with a weight"
-    return (_near(c.weight_kg, 62.6) and c.corrected_at is not None,
-            f"weight={c.weight_kg} corrected_at={c.corrected_at}")
+    weight, corrected_at = mark
+    return (_near(weight, 62.6) and corrected_at is not None,
+            f"weight={weight} corrected_at={corrected_at}")
 
 
 def _priya_field(attr: str, expected) -> Callable[[Ctx], CheckResult]:
@@ -398,7 +442,7 @@ def _priya_asks_to_confirm(ctx: Ctx) -> CheckResult:
     """The reply to a bare '62.6' asks a question naming 62.6."""
     replies = [s.reply for s in ctx.sent if s.message == "62.6"]
     reply = replies[-1] if replies else ""
-    questions = re.findall(r"[^.!?\n]*\?", reply)
+    questions = _questions(reply)
     return any("62.6" in q for q in questions), f"reply: {reply!r}"
 
 
@@ -413,10 +457,12 @@ def _priya_first_milestone(ctx: Ctx) -> CheckResult:
 
 
 def _priya_no_repeat(ctx: Ctx) -> CheckResult:
-    """No check-in reply after the first one calls it her first again."""
-    later = [s for s in ctx.sent if s.onboarded_before and s.checkin_saved and s.message != _PRIYA_FIRST]
+    """No check-in reply on a later day calls it her first again. Same-day
+    corrections of the first check-in may still refer to it."""
+    first_day = next((s.day for s in ctx.sent if s.message == _PRIYA_FIRST), 0)
+    later = [s for s in ctx.sent if s.checkin_saved and s.day > first_day]
     bad = [s.reply for s in later if _FIRST_REPEAT.search(s.reply)]
-    return bool(later) and not bad, f"later check-ins: {len(later)}, repeats: {bad}"
+    return bool(later) and not bad, f"later-day check-ins: {len(later)}, repeats: {bad}"
 
 
 def _priya_milestone_stored(ctx: Ctx) -> CheckResult:
@@ -483,7 +529,7 @@ def _arjun_no_820(ctx: Ctx) -> CheckResult:
 def _arjun_no_820_offer(ctx: Ctx) -> CheckResult:
     """No question offering to save, log or update a weight of 820."""
     offer = re.compile(r"\b(update|save|log|record|change|set|put)\b", re.I)
-    bad = [q.strip() for s in ctx.sent for q in re.findall(r"[^.!?\n]*\?", s.reply)
+    bad = [q.strip() for s in ctx.sent for q in _questions(s.reply)
            if re.search(r"(?<![\d.])820(?![\d.])", q) and offer.search(q)]
     return not bad, f"offers: {bad}"
 
@@ -501,6 +547,19 @@ def _tom_warned(ctx: Ctx) -> CheckResult:
     ok = (bool(re.search(r"\b(back|surgery)\b", reply, re.I))
           and bool(re.search(r"\b(physio\w*|surgeon|doctor)\b", reply, re.I)))
     return ok, f"reply: {reply!r}"
+
+
+_MILESTONE_PHRASE = re.compile(
+    r"\bfirst (check[- ]?in|log|day|weigh[- ]?in|entry)|\bday (one|1)\b|\bmilestone|\bin the books\b", re.I)
+
+
+def _tom_safety_first(ctx: Ctx) -> CheckResult:
+    """The back or surgery mention comes before any milestone phrase."""
+    reply = _reply(ctx, "95kg 6h, want to do heavy deadlifts today")
+    back = re.search(r"\b(back|surgery)\b", reply, re.I)
+    milestone = _MILESTONE_PHRASE.search(reply)
+    ok = back is not None and (milestone is None or back.start() < milestone.start())
+    return ok, f"back at {back and back.start()}, milestone at {milestone and milestone.start()}: {reply!r}"
 
 
 def _tom_injury_not_in_notes(ctx: Ctx) -> CheckResult:
@@ -646,6 +705,9 @@ PERSONAS = [
             "62.6",
             mark_weight("before_yes"),
             "yes",
+            _mark_after_yes,
+            advance_days(1),
+            "63.1 slept 7h legs today",
         ],
         checks=[
             ("onboarding complete", onboarding_complete),
@@ -654,7 +716,7 @@ PERSONAS = [
             ("reply to bare 62.6 asks her to confirm", _priya_asks_to_confirm),
             ("weight ends at 62.6 with corrected_at", _priya_final_weight),
             ("first check-in reply marks it as her first", _priya_first_milestone),
-            ("later check-in replies don't repeat it", _priya_no_repeat),
+            ("next day's check-in reply doesn't repeat it", _priya_no_repeat),
             ("first check-in milestone stored once, can't fire again", _priya_milestone_stored),
             ("sleep 7.5", _priya_field("sleep_hours", 7.5)),
             ("energy 4", _priya_field("energy", 4)),
@@ -740,6 +802,7 @@ PERSONAS = [
             ("active issue mentioning back", _tom_back_issue),
             ("check-in saved", _tom_checkin),
             ("deadlift reply keeps the full back warning", _tom_warned),
+            ("back warning comes before any milestone", _tom_safety_first),
             ("back injury is not in notes", _tom_injury_not_in_notes),
         ],
     ),

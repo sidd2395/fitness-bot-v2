@@ -47,12 +47,15 @@ in phase 2 and isn't in requirements.txt yet.
 
 Phase 1, the local agent, is built, plus the personal-coaching batch:
 motivation question, notes (remember / resolve_note with follow-ups),
-milestones, and length matching in coach.md. Not yet checked by a full
-persona run:
-- Explicit corrections save at once; a bare new value needs a yes
-- A check-in is asked for at most once a day, never in reply to small talk
-- maya (notes and follow-up) and sam (motivation under pressure) personas
-- Short replies must never cut a safety point (Tom's back warning)
+milestones, and length matching in coach.md. Last full run: 152/160. Fixed
+since, not yet checked by a run:
+- Onboarding offers only save_profile (code), so it can't log a check-in
+- Goals map in code ("perform", "perform better"); "no" to motivation is empty
+- Safety points come before milestones (Tom's deadlift reply)
+- Streak wording comes only from "Days in a row"; a gap is not a streak
+- One question mark per reply, including the onboarding goal question
+- Sonnet 5 returned a thinking block with thinking disabled; logged as
+  `unexpected_thinking` with the request id
 
 ## Next: phase 2
 

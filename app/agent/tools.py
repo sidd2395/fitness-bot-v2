@@ -519,6 +519,27 @@ def _profile(user: User, db: Session) -> Profile:
     return user.profile
 
 
+# Words that name each goal. An answer maps to a goal only if it names exactly one.
+_GOAL_WORDS = {
+    "lose_fat":     r"lose|losing|fat|weight loss|lean|leaner|slim|cut|shred|drop",
+    "build_muscle": r"muscle|muscles|jacked|bulk|build|gain|swole|bigger|stronger|strength",
+    "perform":      r"perform|performance|race|racing|compete|competition|sport|faster|endurance|athletic",
+    "feel_better":  r"feel|health|healthier|healthy|energy|wellbeing|mood",
+}
+
+
+def parse_goal(value) -> Optional[str]:
+    """One of GOALS from an enum value or natural language; None if unclear."""
+    text = str(value or "").strip().lower()
+    key = re.sub(r"[\s-]+", "_", text)
+    if key in GOALS:
+        return key
+    if key in ("perform_better", "performance"):
+        return "perform"
+    hits = [g for g, words in _GOAL_WORDS.items() if re.search(rf"\b({words})\b", text)]
+    return hits[0] if len(hits) == 1 else None
+
+
 def _block_minor(user: User, db: Session) -> None:
     """Under 18: delete everything we hold about them, including every message they
     sent (the current one too). Only the user row with telegram_chat_id and
@@ -595,12 +616,19 @@ def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict
             profile.targets_set_by = "user"
             saved["calorie_target"] = inp["calorie_target"]
 
-    if inp.get("goal"):
-        if inp["goal"] not in GOALS:
-            refused["goal"] = f"{inp['goal']!r} is not one of {', '.join(GOALS)}. Not saved. Ask again."
+    # The model may pass "perform better" or leave the goal out of a bare answer
+    # like "perform". Code maps it; while the goal question is open, the message
+    # itself is read as the answer.
+    goal_in = inp.get("goal")
+    if not goal_in and user.onboarding_step == 4 and "?" not in raw_body:
+        goal_in = raw_body if parse_goal(raw_body) else None
+    if goal_in:
+        goal = parse_goal(goal_in)
+        if goal is None:
+            refused["goal"] = f"{goal_in!r} is not one of {', '.join(GOALS)}. Not saved. Ask again."
         else:
-            _profile(user, db).goal = inp["goal"]
-            saved["goal"] = inp["goal"]
+            _profile(user, db).goal = goal
+            saved["goal"] = goal
 
     if inp.get("start_weight") not in (None, ""):
         kg = _to_kg(inp["start_weight"], inp.get("weight_unit"), raw_body)
@@ -680,7 +708,9 @@ def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict
 
 
 _NO_REASON_RE = re.compile(
-    r"(not sure|unsure|idk|i don'?t know|dunno|no idea|no reason|nothing really|no|nah|none)[\s.!]*",
+    r"(not (really )?sure|unsure|idk|i don'?t know|dunno|no idea|no reason( really)?|nothing( really)?|"
+    r"no|nope|nah|none|n/?a|not really|pass|skip)"
+    r"([\s,]+(tbh|really|honestly|lol|haha|yet|atm))*[\s.!]*",
     re.I,
 )
 

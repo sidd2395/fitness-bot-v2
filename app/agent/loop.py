@@ -19,6 +19,9 @@ load_dotenv()
 MODEL_ONBOARDING = os.environ.get("MODEL_ONBOARDING") or "claude-haiku-4-5-20251001"
 MODEL_COACH = os.environ.get("MODEL_COACH") or "claude-sonnet-5"
 MAX_TOOL_CALLS = 4
+# Onboarding is offered save_profile and nothing else, so a check-in sent
+# mid-onboarding can never be logged, whatever the model tries
+ONBOARDING_TOOLS = [t for t in TOOL_SCHEMAS if t["name"] == "save_profile"]
 HISTORY_EXCHANGES = 3
 HISTORY_WINDOW = timedelta(hours=24)
 
@@ -142,11 +145,12 @@ def _history(user_id: int, raw_msg_id: int, db: Session) -> list[dict]:
 def _onboard(user: User, messages: list, raw_msg: RawMessage, db: Session) -> str:
     response = _call(
         MODEL_ONBOARDING, user.user_id, build_system_prompt(user, db), messages,
-        tool_choice={"type": "tool", "name": "save_profile"},
+        tool_choice={"type": "tool", "name": "save_profile"}, tools=ONBOARDING_TOOLS,
     )
     _log("onboarding_save", user.user_id)
     messages.append({"role": "assistant", "content": response.content})
-    messages.append({"role": "user", "content": _run_tools(response, user.user_id, raw_msg.id, db)})
+    messages.append({"role": "user", "content": _run_tools(response, user.user_id, raw_msg.id, db,
+                                                           allowed={"save_profile"})})
 
     db.refresh(user)
     if user.blocked:
@@ -159,7 +163,7 @@ def _onboard(user: User, messages: list, raw_msg: RawMessage, db: Session) -> st
     # Rebuilt so the per-turn block names the question that is now next
     response = _call(
         MODEL_ONBOARDING, user.user_id, build_system_prompt(user, db), messages,
-        tool_choice={"type": "none"},
+        tool_choice={"type": "none"}, tools=ONBOARDING_TOOLS,
     )
     return _extract_text(response)
 
@@ -278,7 +282,8 @@ def _looks_like_checkin(message: str) -> bool:
 # --------------------------------------------------------------------------- #
 
 def _call(model: str, user_id: int, system: list, messages: list,
-          tool_choice: Optional[dict] = None, max_tokens: int = 1024):
+          tool_choice: Optional[dict] = None, max_tokens: int = 1024,
+          tools: Optional[list] = None):
     kwargs = {"tool_choice": tool_choice} if tool_choice else {}
     response = _client.messages.create(
         model=model,
@@ -287,7 +292,7 @@ def _call(model: str, user_id: int, system: list, messages: list,
         # tool_choice can't be combined with thinking (Sonnet 5 thinks by default)
         thinking={"type": "disabled"},
         system=system,
-        tools=TOOL_SCHEMAS,
+        tools=tools if tools is not None else TOOL_SCHEMAS,
         messages=messages,
         **kwargs,
     )
@@ -295,13 +300,23 @@ def _call(model: str, user_id: int, system: list, messages: list,
     # so an empty reply can be traced to its cause
     blocks = ",".join(b.type for b in response.content) or "none"
     _log("model_call", user_id, f"model={model} stop={response.stop_reason} blocks={blocks}")
+    if any(b.type in ("thinking", "redacted_thinking") for b in response.content):
+        # Thinking is disabled on every call, so this shouldn't happen. The
+        # request id lets Anthropic look the call up.
+        logger.warning("event=unexpected_thinking user_id=%d model=%s request_id=%s",
+                       user_id, model, getattr(response, "_request_id", None))
     return response
 
 
-def _run_tools(response, user_id: int, raw_msg_id: int, db: Session) -> list[dict]:
+def _run_tools(response, user_id: int, raw_msg_id: int, db: Session,
+               allowed: Optional[set] = None) -> list[dict]:
     results = []
     for block in response.content:
-        if block.type == "tool_use":
+        if block.type == "tool_use" and allowed is not None and block.name not in allowed:
+            # Refused, never run: the model still gets a result for its call
+            results.append(_tool_result(block.id, {"error": f"{block.name} isn't available during onboarding."}))
+            _log("tool_refused", user_id, block.name)
+        elif block.type == "tool_use":
             results.append(_tool_result(block.id, dispatch(block.name, block.input, user_id, raw_msg_id, db)))
             _log("tool_call", user_id, block.name)
     return results
