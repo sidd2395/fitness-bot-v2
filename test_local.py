@@ -56,7 +56,7 @@ from app.db.session import SessionLocal, engine  # noqa: E402
 from app.db.models import Base, Checkin, Milestone, Note, Profile, RawMessage, User  # noqa: E402
 from app.db import delete_user  # noqa: E402
 from app.agent import loop as agent_loop  # noqa: E402
-from app.agent.context import asks_for_checkin  # noqa: E402
+from app.agent.context import asks_for_checkin, checkin_request_line  # noqa: E402
 from app.agent.loop import (  # noqa: E402
     BLOCKED_REPLY, MODEL_COACH, MODEL_ONBOARDING, ONBOARDED_REPLY, WELCOME_REPLY, run,
 )
@@ -179,6 +179,9 @@ def send(ctx: Ctx, message: str) -> None:
     follow_up_due = any(n.follow_up_on and n.follow_up_on <= date.today() and not n.resolved
                         for n in user.notes)
     struggling = onboarded and _struggling(ctx)
+    if onboarded:
+        # What the context block tells the model about asking for a check-in
+        print(f"    [context] {checkin_request_line(ctx.user_id, date.today(), ctx.db)}")
     before = len(_checkins(ctx))
     _TOOL_LOG.clear()
     _USAGE_LOG.clear()
@@ -393,6 +396,18 @@ def short_checkin_short_reply(ctx: Ctx) -> CheckResult:
     return not bad, f"(message, words): {bad}"
 
 
+def no_repeated_runs(ctx: Ctx) -> CheckResult:
+    """No reply contains the same 6-word run twice (a draft sent alongside the final)."""
+    bad = []
+    for s in ctx.sent:
+        w = _words(s.reply)
+        grams = [tuple(w[i:i + 6]) for i in range(len(w) - 5)]
+        repeated = {" ".join(g) for g in grams if grams.count(g) > 1}
+        if repeated:
+            bad.append((s.message, sorted(repeated)))
+    return not bad, f"repeated: {bad}"
+
+
 def no_checkin_during_onboarding(ctx: Ctx) -> CheckResult:
     """Nothing sent before onboarding completed saved a check-in."""
     bad = [s.message for s in ctx.sent
@@ -415,6 +430,7 @@ COMMON_CHECKS = [
     ("every check-in reply is at least 15 words", checkin_replies_not_too_short),
     ("check-in of 8 words or fewer gets 80 words or fewer", short_checkin_short_reply),
     ("no check-in saved before onboarding completes", no_checkin_during_onboarding),
+    ("no reply repeats the same 6-word run", no_repeated_runs),
     ("no reply has more than one question mark", one_question_at_most),
 ]
 
@@ -478,6 +494,16 @@ def _priya_no_repeat(ctx: Ctx) -> CheckResult:
     later = [s for s in ctx.sent if s.checkin_saved and s.day > first_day]
     bad = [s.reply for s in later if _FIRST_REPEAT.search(s.reply)]
     return bool(later) and not bad, f"later-day check-ins: {len(later)}, repeats: {bad}"
+
+
+_PRIYA_DAY_2 = "63.1 slept 7h legs today"
+
+
+def _priya_day2_direction(ctx: Ctx) -> CheckResult:
+    """62.6 -> 63.1 is up: the day-2 reply mustn't call it down."""
+    reply = _reply(ctx, _PRIYA_DAY_2)
+    hits = re.findall(r"\b(down|lost|dropped)\b", reply, re.I)
+    return bool(reply) and not hits, f"found {hits} in reply: {reply!r}"
 
 
 def _priya_milestone_stored(ctx: Ctx) -> CheckResult:
@@ -722,7 +748,7 @@ PERSONAS = [
             "yes",
             _mark_after_yes,
             advance_days(1),
-            "63.1 slept 7h legs today",
+            _PRIYA_DAY_2,
         ],
         checks=[
             ("onboarding complete", onboarding_complete),
@@ -732,6 +758,7 @@ PERSONAS = [
             ("weight ends at 62.6 with corrected_at", _priya_final_weight),
             ("first check-in reply marks it as her first", _priya_first_milestone),
             ("next day's check-in reply doesn't repeat it", _priya_no_repeat),
+            ("day-2 reply (62.6 -> 63.1) doesn't say down, lost or dropped", _priya_day2_direction),
             ("first check-in milestone stored once, can't fire again", _priya_milestone_stored),
             ("sleep 7.5", _priya_field("sleep_hours", 7.5)),
             ("energy 4", _priya_field("energy", 4)),

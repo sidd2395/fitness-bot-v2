@@ -88,6 +88,33 @@ def compute(user_id: int, db: Session, today: date) -> dict:
     }
 
 
+def weight_change_since_last(user_id: int, db: Session, on: date) -> Optional[dict]:
+    """The weigh-in on this date against the one before it, worked out here so
+    the model never does the subtraction. One weight per day, the latest entry.
+    None if there's no weigh-in on this date or none before it."""
+    rows = (
+        db.query(Checkin.date, Checkin.weight_kg)
+        .filter(Checkin.user_id == user_id, Checkin.weight_kg.isnot(None), Checkin.date <= on)
+        .order_by(Checkin.date, Checkin.checkin_id)
+        .all()
+    )
+    by_day = {d: w for d, w in rows}
+    if on not in by_day:
+        return None
+    earlier = [d for d in by_day if d < on]
+    if not earlier:
+        return None
+    prev = max(earlier)
+    change = round(by_day[on] - by_day[prev], 1)
+    return {
+        "weight_kg": by_day[on],
+        "previous_weight_kg": by_day[prev],
+        "change_since_last_kg": change,
+        "direction": "up" if change > 0 else "down" if change < 0 else "same",
+        "days_between": (on - prev).days,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # Milestones                                                                    #
 # Worked out here, never by the model. A check-in milestone only counts if     #

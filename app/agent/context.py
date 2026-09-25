@@ -4,7 +4,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.db.models import Checkin, Note, RawMessage, User
-from app.agent.stats import claim_milestone, compute as compute_stats
+from app.agent.stats import claim_milestone, compute as compute_stats, weight_change_since_last
 from app.agent.tools import ONBOARDING_LABELS, ONBOARDING_STEPS
 
 # --------------------------------------------------------------------------- #
@@ -54,10 +54,11 @@ and health issues (save_profile issue). Don't save what is already under NOTES.
 - When FOLLOW-UPS DUE lists a note, ask about it naturally in this reply and \
 call resolve_note with its id in the same turn, so you only ask once. Also \
 resolve a note when they tell you it's no longer true.
-- Ask them for a check-in at most once a day: only when the context block says \
-"Check-in requested today: no" and nothing is logged today. If it says you \
-already asked, do not ask again, not even as a closing line. Never ask for one \
-in a reply to thanks, small talk, or a message that isn't about their training.\
+- Check-in requests: the context block has one line about this. If it says \
+"Already asked today", do not ask for a check-in again, and don't end with an \
+invitation to log. Only when it says "Check-in requested today: no" and \
+nothing is logged today may you ask, once. Never ask for one in a reply to \
+thanks, small talk, or a message that isn't about their training.\
 """
 
 # --------------------------------------------------------------------------- #
@@ -223,6 +224,14 @@ def _context_block(user: User, db: Session) -> str:
     if s["days_since_last_checkin"] and s["days_since_last_checkin"] > 1:
         lines.append(f"Back after a gap: last check-in before today was "
                      f"{s['days_since_last_checkin']} days ago.")
+    last = weight_change_since_last(user.user_id, db, today)
+    if last:
+        sign = "+" if last["change_since_last_kg"] > 0 else ""
+        lines.append(
+            f"Weight today {last['weight_kg']}kg: {sign}{last['change_since_last_kg']}kg "
+            f"({last['direction']}) since {last['previous_weight_kg']}kg "
+            f"{last['days_between']} day(s) before."
+        )
     if s["weight_change_7d"] is not None:
         delta = s["weight_change_7d"]
         sign = "+" if delta > 0 else ""
@@ -247,10 +256,7 @@ def _context_block(user: User, db: Session) -> str:
     })
     lines.append(f"Already asked today: {', '.join(asked) if asked else 'nothing'}.")
     # Whether any reply today (the "all set" reply included) asked for a check-in
-    if _checkin_requested_today(user.user_id, today, db):
-        lines.append("You already asked for a check-in today. Do not ask again.")
-    else:
-        lines.append("Check-in requested today: no.")
+    lines.append(checkin_request_line(user.user_id, today, db))
 
     # --- Notes: long-term memory, written by the remember tool -------------- #
     open_notes = (
@@ -305,6 +311,14 @@ def asks_for_checkin(text: str) -> bool:
         if _ASK_VERB.search(sentence) and _ASK_WHAT.search(sentence):
             return True
     return False
+
+
+def checkin_request_line(user_id: int, today: date, db: Session) -> str:
+    """The context block's line about asking for a check-in, with its rule."""
+    if _checkin_requested_today(user_id, today, db):
+        return ("Already asked today: do not ask for a check-in again, and don't end "
+                "with an invitation to log.")
+    return "Check-in requested today: no."
 
 
 def _checkin_requested_today(user_id: int, today: date, db: Session) -> bool:

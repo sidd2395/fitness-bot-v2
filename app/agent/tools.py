@@ -4,7 +4,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.db.models import Checkin, Issue, Note, Profile, RawMessage, User
-from app.agent.stats import claim_milestone, compute as compute_stats
+from app.agent.stats import claim_milestone, compute as compute_stats, weight_change_since_last
 
 CALORIE_FLOOR = {"M": 1500, "F": 1200}
 
@@ -451,6 +451,13 @@ def _log_checkin(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict:
     }
     if milestone:
         result["milestone_today"] = f"{milestone}. Mention it once, briefly."
+    # Weight saved: the change since the previous weigh-in, computed here
+    if "weight_kg" in fields_saved:
+        change = weight_change_since_last(user_id, db, target_date)
+        if change:
+            result["weight_change"] = change
+        else:
+            result["weight_change"] = "first weigh-in, no earlier weight to compare"
     _add_refusals(result, rejected, needs_confirmation)
     return result
 

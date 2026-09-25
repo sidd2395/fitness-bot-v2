@@ -47,6 +47,13 @@ EMPTY_REPLY_SAVED = (
 EMPTY_REPLY_NOTHING_SAVED = (
     "Sorry, I couldn't put a reply together just now. Try sending that again in a moment."
 )
+# Sent back with tool results when the model wrote text alongside its tool call.
+# That text is a draft and is never sent, so the next reply has to stand alone.
+DRAFT_NOT_SENT_NOTE = (
+    "The text you wrote alongside those tool calls was not sent to the person. "
+    "Your next reply is the only thing they will see, so make it complete, "
+    "including any warning."
+)
 
 _client = anthropic.Anthropic()
 logger = logging.getLogger(__name__)
@@ -180,7 +187,8 @@ def _coach(user: User, message: str, messages: list, raw_msg: RawMessage, db: Se
     checkin_logged = False
     safety_net_run = False
     saved_this_turn = False
-    texts: list[str] = []   # text from every response in the turn, in order
+    final = ""              # text of the response that ends the turn: the reply
+    drafts: list[str] = []  # text written alongside tool calls: never sent unless final is empty
 
     def run_tools(response, force_checkin: bool = False) -> None:
         nonlocal tool_calls_used, checkin_logged, saved_this_turn
@@ -203,6 +211,11 @@ def _coach(user: User, message: str, messages: list, raw_msg: RawMessage, db: Se
                  f"{block.name} saved={bool(result.get('saved'))}")
             if block.name == "log_checkin":
                 checkin_logged = True
+        draft = _all_text(response)
+        if draft:
+            drafts.append(draft)
+            # After the tool results: the API wants tool_result blocks first
+            tool_results.append({"type": "text", "text": DRAFT_NOT_SENT_NOTE})
         messages.append({"role": "user", "content": tool_results})
 
     # ------------------------------------------------------------------ #
@@ -237,11 +250,10 @@ def _coach(user: User, message: str, messages: list, raw_msg: RawMessage, db: Se
                     _log("forced_checkin_failed", user_id)
                     raw_msg.status = "failed"
                     db.commit()
-            texts.append(_all_text(response))
+            final = _all_text(response)
             break
 
         messages.append({"role": "assistant", "content": response.content})
-        texts.append(_all_text(response))
         run_tools(response)
 
         # ------------------------------------------------------------------ #
@@ -252,18 +264,21 @@ def _coach(user: User, message: str, messages: list, raw_msg: RawMessage, db: Se
         if tool_calls_used >= MAX_TOOL_CALLS:
             response = _call(MODEL_COACH, user_id, system, messages, tool_choice={"type": "none"})
             _log("forced_text", user_id)
-            texts.append(_all_text(response))
+            final = _all_text(response)
             break
 
     # ------------------------------------------------------------------ #
-    # Reply: all the text from the turn, in order. The model sometimes    #
-    # writes the real reply (safety warnings included) before a tool call #
-    # and only a filler line after it; sending only the last text would   #
-    # drop the warning. Only if there is no text anywhere, retry once     #
-    # with text forced; if that is empty too, send a fixed line so the    #
-    # user never gets silence.                                             #
+    # Reply: only the final text. Text written alongside a tool call is a #
+    # draft: sending it as well duplicated warnings and advice, so the    #
+    # model is told it wasn't sent and writes a complete final reply.     #
+    # Fallback ladder if the final text is empty: the latest draft, then  #
+    # one retry with text forced, then a fixed line so the user never     #
+    # gets silence.                                                        #
     # ------------------------------------------------------------------ #
-    reply = "\n\n".join(t for t in texts if t)
+    reply = final
+    if not reply and drafts:
+        _log("draft_used", user_id)
+        reply = drafts[-1]
     if not reply:
         _log("empty_reply_retry", user_id)
         reply = _all_text(_call(MODEL_COACH, user_id, system, messages, tool_choice={"type": "none"}))

@@ -46,8 +46,11 @@ cheerleading.
 
 # Reading the day
 
-Use the facts in the context block, never your own guesses. Lead
-with the single most important thing:
+Use the facts in the context block, never your own guesses. Only
+state a weight change that appears in a log_checkin result
+(weight_change) or the context block, with the direction it gives.
+Never work out a change or its direction yourself from the numbers.
+Lead with the single most important thing:
 
 1. Pain, injury, or an active issue relevant to today
 2. Short sleep of 2 or more nights

@@ -48,17 +48,15 @@ in phase 2 and isn't in requirements.txt yet.
 
 ## Current state
 
-Phase 1, the local agent, is built, plus the personal-coaching batch:
-motivation question, notes (remember / resolve_note with follow-ups),
-milestones, and length matching in coach.md. Last full run: 152/160. Fixed
-since, not yet checked by a run:
-- Onboarding offers only save_profile (code), so it can't log a check-in
-- Goals map in code ("perform", "perform better"); "no" to motivation is empty
-- Safety points come before milestones (Tom's deadlift reply)
-- Streak wording comes only from "Days in a row"; a gap is not a streak
-- One question mark per reply, including the onboarding goal question
-- Sonnet 5 returned a thinking block with thinking disabled; logged as
-  `unexpected_thinking` with the request id
+Phase 1, the local agent, is built, plus the personal-coaching batch
+(motivation, notes, milestones, length matching) and cost tracking. Last full
+run: 172/173. Fixed since, not yet checked by a run:
+- Only the final text of a turn is sent; text written alongside a tool call
+  is a draft, used only if the final text is empty
+- log_checkin returns weight_change (since the last weigh-in, computed in
+  code); the coach may only state changes it's given
+- The check-in rule sits on its context line ("Already asked today: ..."),
+  and the test transcript prints that line on every coaching turn
 
 ## Next: phase 2
 
