@@ -8,6 +8,6 @@ def delete_user(user_id: int, db: Session) -> bool:
     user = db.get(User, user_id)
     if user is None:
         return False
-    db.delete(user)  # ORM cascade removes profile, issues, checkins, raw_messages
+    db.delete(user)  # ORM cascade removes profile, issues, notes, milestones, checkins, raw_messages
     db.commit()
     return True

@@ -3,9 +3,9 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from sqlalchemy.orm import Session
 
-from app.db.models import Checkin, RawMessage, User
-from app.agent.stats import compute as compute_stats
-from app.agent.tools import ONBOARDING_LABELS
+from app.db.models import Checkin, Note, RawMessage, User
+from app.agent.stats import claim_milestone, compute as compute_stats
+from app.agent.tools import ONBOARDING_LABELS, ONBOARDING_STEPS
 
 # --------------------------------------------------------------------------- #
 # Coach voice — edit prompts/coach.md, not this file. Loaded once at startup.   #
@@ -45,6 +45,15 @@ language and carry on without setting a target.
 - Never ask for anything already listed under PROFILE: name, age, sex, goal \
 or weight.
 - Never ask about a field listed under "Already asked today".
+- remember: save things that will matter in later conversations: schedule, \
+travel, events, likes and dislikes, work or family context that affects \
+training. One fact per note, short and specific. If there's something worth \
+asking about later, set follow_up_on, usually the day after it ends, worked \
+out from today's date. Never save check-in numbers (log_checkin) or injuries \
+and health issues (save_profile issue). Don't save what is already under NOTES.
+- When FOLLOW-UPS DUE lists a note, ask about it naturally in this reply and \
+call resolve_note with its id in the same turn, so you only ask once. Also \
+resolve a note when they tell you it's no longer true.
 - Ask them for a check-in at most once a day: only when the context block says \
 "Check-in requested today: no" and nothing is logged today. Never ask for one \
 in a reply to thanks, small talk, or a message that isn't about their training.\
@@ -71,6 +80,7 @@ in pounds, pass the pounds number with weight_unit "lb". Code converts.
 context block says which one. Never ask for something already saved.
 - If they ask about something else, say briefly it isn't your area and ask \
 the current question again.
+- Ask one question per message only. Don't open with their name.
 
 Questions, in order:
 1. name: Ask for their first name only.
@@ -82,10 +92,13 @@ both fine.
 5. main goal: Ask for their main goal: lose fat, build muscle, perform \
 better, or feel better. Accept natural language and map it to lose_fat, \
 build_muscle, perform or feel_better.
-6. injuries or health issues: Ask about any injuries or health issues you \
+6. why they're starting now: Ask what made them want to start now. Any \
+answer is fine. Save a short version in their own words as motivation. If \
+they aren't sure, call save_profile with motivation="" and move on.
+7. injuries or health issues: Ask about any injuries or health issues you \
 should know about before giving training advice. If they say none, call \
 save_profile with issue="".
-7. trainer name: Ask if they have a personal trainer. If they say no, call \
+8. trainer name: Ask if they have a personal trainer. If they say no, call \
 save_profile with trainer_name="". If they say yes without a name, save \
 nothing and ask for the trainer's first name.\
 """
@@ -99,7 +112,7 @@ STATIC_PROMPT = f"{COACH_PROMPT}\n\n{_TOOL_RULES}\n\n{_ONBOARDING_RULES}"
 
 def build_system_prompt(user: User, db: Session) -> list[dict]:
     """Static part first with a cache breakpoint, then the part that changes each turn."""
-    if user.onboarding_step < 7:
+    if user.onboarding_step < ONBOARDING_STEPS:
         dynamic = _onboarding_block(user)
     else:
         dynamic = _context_block(user, db)
@@ -129,7 +142,7 @@ def _onboarding_block(user: User) -> str:
         known.append(f"goal {profile.goal.replace('_', ' ')}")
     return (
         f"ONBOARDING\n"
-        f"Next question: {step + 1} of 7, {ONBOARDING_LABELS[step]}.\n"
+        f"Next question: {step + 1} of {ONBOARDING_STEPS}, {ONBOARDING_LABELS[step]}.\n"
         f"Saved so far: {', '.join(known) if known else 'nothing'}."
     )
 
@@ -139,6 +152,11 @@ def _onboarding_block(user: User) -> str:
 # --------------------------------------------------------------------------- #
 
 _SEX_LABEL = {"M": "male", "F": "female"}
+NOTES_SHOWN = 10
+
+
+def _follow_up(note: Note) -> str:
+    return f" (follow up {note.follow_up_on.strftime('%a %d %b')})" if note.follow_up_on else ""
 
 
 def _context_block(user: User, db: Session) -> str:
@@ -157,9 +175,10 @@ def _context_block(user: User, db: Session) -> str:
     )
     today_checkins = [c for c in recent if c.date == today]
 
-    lines: list[str] = []
+    lines: list[str] = [f"Today: {today.strftime('%A %d %B %Y')} ({today.isoformat()})."]
 
     # --- Profile ----------------------------------------------------------- #
+    lines.append("")
     lines.append("PROFILE")
     goal = (profile.goal or "not set").replace("_", " ") if profile else "not set"
     sex = _SEX_LABEL.get(user.sex, "not set")
@@ -176,6 +195,8 @@ def _context_block(user: User, db: Session) -> str:
             targets.append(f"{profile.protein_target_g}g protein")
         if targets:
             lines.append(f"Targets: {', '.join(targets)} (set by {profile.targets_set_by}).")
+    if profile and profile.motivation:
+        lines.append(f'Why they started, in their words: "{profile.motivation}".')
 
     # --- Active issues — loaded every turn so they are never forgotten ------ #
     if active_issues:
@@ -199,6 +220,10 @@ def _context_block(user: User, db: Session) -> str:
         lines.append(f"Short sleep: {s['short_sleep_streak']} nights running.")
     lines.append(f"Today: {s['logged_today']}.")
     lines.append(f"State: {s['user_state']}.")
+    # Stored as it's handed over, so it shows on this turn only
+    milestone = claim_milestone(user.user_id, db, today)
+    if milestone:
+        lines.append(f"Milestone today: {milestone}. Mention it once, briefly.")
 
     # Already asked today: fields the bot has already reminded them about today,
     # recorded by log_checkin in nudged_fields. The model must not ask again.
@@ -213,6 +238,25 @@ def _context_block(user: User, db: Session) -> str:
     # Whether any reply today (the "all set" reply included) asked for a check-in
     requested = "yes, don't ask again today" if _checkin_requested_today(user.user_id, today, db) else "no"
     lines.append(f"Check-in requested today: {requested}.")
+
+    # --- Notes: long-term memory, written by the remember tool -------------- #
+    open_notes = (
+        db.query(Note)
+        .filter(Note.user_id == user.user_id, Note.resolved.is_(False))
+        .order_by(Note.created_at.desc(), Note.note_id.desc())
+        .all()
+    )
+    if open_notes:
+        lines.append("")
+        lines.append("NOTES (newest first, id in brackets)")
+        for n in open_notes[:NOTES_SHOWN]:
+            lines.append(f"- [{n.note_id}] {n.text}{_follow_up(n)}")
+    due = [n for n in open_notes if n.follow_up_on and n.follow_up_on <= today]
+    if due:
+        lines.append("")
+        lines.append("FOLLOW-UPS DUE (ask about one naturally, then resolve_note it)")
+        for n in sorted(due, key=lambda n: n.follow_up_on):
+            lines.append(f"- [{n.note_id}] {n.text}{_follow_up(n)}")
 
     # --- Last 3 days -------------------------------------------------------- #
     if recent:

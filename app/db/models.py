@@ -1,7 +1,7 @@
 from datetime import datetime
 from sqlalchemy import (
     Column, Integer, String, Float, Boolean,
-    DateTime, Date, Text, ForeignKey,
+    DateTime, Date, Text, ForeignKey, UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
 
@@ -22,7 +22,7 @@ class User(Base):
     consent_given_at = Column(DateTime, nullable=True)
     joined_at        = Column(DateTime, default=datetime.utcnow, nullable=False)
     last_active_at   = Column(DateTime, default=datetime.utcnow, nullable=False)
-    onboarding_step  = Column(Integer, default=0, nullable=False)  # 0–7; 7 = complete
+    onboarding_step  = Column(Integer, default=0, nullable=False)  # 0–8; 8 = complete
     # Under 18. Personal data is cleared; every message gets a fixed reply, no model call
     blocked          = Column(Boolean, default=False, nullable=False)
 
@@ -32,6 +32,10 @@ class User(Base):
     issues       = relationship("Issue",      back_populates="user",
                                 cascade="all, delete-orphan")
     checkins     = relationship("Checkin",    back_populates="user",
+                                cascade="all, delete-orphan")
+    notes        = relationship("Note",       back_populates="user",
+                                cascade="all, delete-orphan")
+    milestones   = relationship("Milestone",  back_populates="user",
                                 cascade="all, delete-orphan")
     raw_messages = relationship("RawMessage", back_populates="user",
                                 foreign_keys="RawMessage.user_id",
@@ -49,6 +53,7 @@ class Profile(Base):
     protein_target_g = Column(Integer, nullable=True)
     targets_set_by   = Column(String, nullable=True)   # user | coach
     disciplines      = Column(String, nullable=True)   # comma-separated
+    motivation       = Column(String(200), nullable=True)  # why they started, in their words
 
     user = relationship("User", back_populates="profile")
 
@@ -63,6 +68,34 @@ class Issue(Base):
     first_mentioned = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     user = relationship("User", back_populates="issues")
+
+
+class Note(Base):
+    """Long-term memory: things the coach should know in later conversations
+    (schedule, travel, likes, life context). Not check-in numbers, not injuries."""
+    __tablename__ = "notes"
+
+    note_id      = Column(Integer, primary_key=True, autoincrement=True)
+    user_id      = Column(Integer, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False, index=True)
+    text         = Column(String(200), nullable=False)
+    follow_up_on = Column(Date,     nullable=True)
+    resolved     = Column(Boolean,  default=False, nullable=False)
+    created_at   = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    user = relationship("User", back_populates="notes")
+
+
+class Milestone(Base):
+    """A milestone already mentioned. Stored so it never fires twice."""
+    __tablename__ = "milestones"
+    __table_args__ = (UniqueConstraint("user_id", "kind", name="uq_milestones_user_kind"),)
+
+    milestone_id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id      = Column(Integer, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False)
+    kind         = Column(String, nullable=False)
+    reached_on   = Column(Date,   nullable=False)
+
+    user = relationship("User", back_populates="milestones")
 
 
 class Checkin(Base):

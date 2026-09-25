@@ -3,8 +3,8 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 from sqlalchemy.orm import Session
 
-from app.db.models import Checkin, Issue, Profile, RawMessage, User
-from app.agent.stats import compute as compute_stats
+from app.db.models import Checkin, Issue, Note, Profile, RawMessage, User
+from app.agent.stats import claim_milestone, compute as compute_stats
 
 CALORIE_FLOOR = {"M": 1500, "F": 1200}
 
@@ -19,6 +19,9 @@ CHECKIN_RANGES = {
 
 LB_TO_KG = 0.4536
 ADULT_AGE = 18
+NOTE_MAX_CHARS = 200
+MAX_OPEN_NOTES = 30
+FOLLOW_UP_MAX_DAYS = 365
 GOALS = ("lose_fat", "build_muscle", "perform", "feel_better")
 
 _WEIGHT_DESCRIPTION = (
@@ -126,11 +129,58 @@ TOOL_SCHEMAS = [
                     "type": "string",
                     "description": "Their trainer's name. Pass an empty string only if they said they have none.",
                 },
+                "motivation": {
+                    "type": "string",
+                    "description": (
+                        "What made them want to start now, shortened to a few words in their own "
+                        "words, e.g. 'keep up with my kids'. Any answer counts. Pass an empty "
+                        "string if they aren't sure."
+                    ),
+                },
                 "user_confirmed": {
                     "type": "boolean",
                     "description": "Must be true when changing a value that was previously saved.",
                 },
             },
+        },
+    },
+    {
+        "name": "remember",
+        "description": (
+            "Save something about the person that will matter in later conversations: "
+            "schedule, travel, events, likes and dislikes, work or family context that "
+            "affects training. Not check-in numbers (log_checkin) and not injuries or "
+            "health issues (save_profile issue). One fact per note, under 200 characters."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": "Short and specific, e.g. 'Work trip to Tokyo 5 to 9 Oct, hotel gym only'.",
+                },
+                "follow_up_on": {
+                    "type": "string",
+                    "description": (
+                        "YYYY-MM-DD. The day to ask how it went, if it's worth asking about: "
+                        "usually the day after an event or trip ends. Work it out from "
+                        "today's date in the context block. Omit if there's nothing to follow up."
+                    ),
+                },
+            },
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "resolve_note",
+        "description": (
+            "Mark a note as done: its follow-up has been asked about, or it's no longer true. "
+            "Use the id shown in brackets in the context block."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"note_id": {"type": "integer"}},
+            "required": ["note_id"],
         },
     },
 ]
@@ -141,6 +191,10 @@ def dispatch(name: str, inp: dict, user_id: int, raw_msg_id: int, db: Session) -
         return _log_checkin(inp, user_id, raw_msg_id, db)
     if name == "save_profile":
         return _save_profile(inp, user_id, raw_msg_id, db)
+    if name == "remember":
+        return _remember(inp, user_id, db)
+    if name == "resolve_note":
+        return _resolve_note(inp, user_id, db)
     return {"error": f"unknown tool: {name}"}
 
 
@@ -248,15 +302,8 @@ def _signals_correction(raw_body: str) -> bool:
 
 def _log_checkin(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict:
     user = db.get(User, user_id)
-    if user.blocked or user.onboarding_step < 7 or not is_adult(user.age):
-        return {
-            "saved": False,
-            "error": (
-                "Onboarding is not complete, so check-ins can't be saved yet. Nothing was "
-                "saved. Tell them you need a couple of details first, then ask the next "
-                "onboarding question."
-            ),
-        }
+    if not _onboarded(user):
+        return _NOT_ONBOARDED
 
     # Missing counts as false: a check-in has to be declared, so a forced call on a
     # request like "set my calories to 1000" saves nothing
@@ -392,6 +439,7 @@ def _log_checkin(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict:
     db.commit()
 
     stats = compute_stats(user_id, db, today)
+    milestone = claim_milestone(user_id, db, today)
 
     result = {
         "saved": True,
@@ -401,6 +449,8 @@ def _log_checkin(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict:
         "fields_missing": fields_missing,
         **stats,
     }
+    if milestone:
+        result["milestone_today"] = f"{milestone}. Mention it once, briefly."
     _add_refusals(result, rejected, needs_confirmation)
     return result
 
@@ -434,9 +484,26 @@ ONBOARDING_LABELS = {
     2: "sex",
     3: "current weight",
     4: "main goal",
-    5: "injuries or health issues",
-    6: "trainer name",
+    5: "why they're starting now",
+    6: "injuries or health issues",
+    7: "trainer name",
 }
+# onboarding_step == ONBOARDING_STEPS means onboarding is complete
+ONBOARDING_STEPS = len(ONBOARDING_LABELS)
+
+_NOT_ONBOARDED = {
+    "saved": False,
+    "error": (
+        "Onboarding is not complete, so nothing can be saved yet. Nothing was "
+        "saved. Tell them you need a couple of details first, then ask the next "
+        "onboarding question."
+    ),
+}
+
+
+def _onboarded(user: User) -> bool:
+    return not user.blocked and user.onboarding_step >= ONBOARDING_STEPS and is_adult(user.age)
+
 
 _SEX_WORDS = {
     "m": "M", "male": "M", "man": "M", "guy": "M",
@@ -458,7 +525,8 @@ def _block_minor(user: User, db: Session) -> None:
     blocked=true is kept, so they stay blocked."""
     if user.profile is not None:
         db.delete(user.profile)
-    for row in list(user.raw_messages) + list(user.issues) + list(user.checkins):
+    for row in (list(user.raw_messages) + list(user.issues) + list(user.checkins)
+                + list(user.notes) + list(user.milestones)):
         db.delete(row)
     user.name = user.age = user.sex = user.trainer_name = None
     user.consent_given_at = None
@@ -560,12 +628,26 @@ def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict
         db.add(issue)
         saved["issue"] = inp["issue"]
 
+    # Any answer to "what made you start now" counts. If the model left it out
+    # while that question is open, the message itself is the answer, unless it
+    # is a question back to us.
+    motivation_answered = "motivation" in inp
+    motivation = inp.get("motivation")
+    if not motivation_answered and user.onboarding_step == 5 and raw_body.strip() and "?" not in raw_body:
+        motivation_answered, motivation = True, raw_body
+    if motivation_answered:
+        motivation = " ".join(str(motivation or "").split())[:NOTE_MAX_CHARS]
+        if _NO_REASON_RE.fullmatch(motivation):
+            motivation = ""
+        _profile(user, db).motivation = motivation or None
+        saved["motivation"] = motivation
+
     # Advance onboarding step past every question whose answer is now saved and valid.
-    # Steps 5 and 6 are "asked" steps — they advance when the key is present in inp
-    # (even empty string), meaning the question was answered even if the answer was "none".
+    # Steps 5, 6 and 7 are "asked" steps: they advance when the question was answered,
+    # even if the answer was "not sure" or "none".
     profile = user.profile
     step = user.onboarding_step
-    while step < 7:
+    while step < ONBOARDING_STEPS:
         if   step == 0 and user.name:
             step = 1
         elif step == 1 and is_adult(user.age):
@@ -576,10 +658,12 @@ def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict
             step = 4
         elif step == 4 and profile and profile.goal:
             step = 5
-        elif step == 5 and "issue" in inp:
+        elif step == 5 and motivation_answered:
             step = 6
-        elif step == 6 and "trainer_name" in inp:
+        elif step == 6 and "issue" in inp:
             step = 7
+        elif step == 7 and "trainer_name" in inp:
+            step = 8
         else:
             break
 
@@ -591,5 +675,88 @@ def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict
         "refused": refused,
         "onboarding_step": step,
         "next_question": ONBOARDING_LABELS.get(step),
-        "onboarding_complete": step >= 7,
+        "onboarding_complete": step >= ONBOARDING_STEPS,
     }
+
+
+_NO_REASON_RE = re.compile(
+    r"(not sure|unsure|idk|i don'?t know|dunno|no idea|no reason|nothing really|no|nah|none)[\s.!]*",
+    re.I,
+)
+
+
+# ---------------------------------------------------------------------------
+# remember / resolve_note: long-term memory
+# ---------------------------------------------------------------------------
+
+# Injuries belong in the issues table, check-in numbers in checkins. Refused
+# here so they can't end up in notes instead.
+_INJURY_RE = re.compile(
+    r"\b(injur\w*|pain\w*|sore\w*|surgery|surgeries|sprain\w*|strain(ed)?|physio\w*|hurts?|"
+    r"torn|fractur\w*|tendon\w*|ligament\w*|herniat\w*|disc|sciatica|arthritis|acl|mcl)\b",
+    re.I,
+)
+_NUMBERS_RE = re.compile(
+    r"\d+(?:\.\d+)?\s*(kg|kgs|lbs?|pounds|kcal|cals?|calories)\b|\b(weighed|slept)\s+\d",
+    re.I,
+)
+
+
+def _remember(inp: dict, user_id: int, db: Session) -> dict:
+    user = db.get(User, user_id)
+    if not _onboarded(user):
+        return _NOT_ONBOARDED
+
+    text = " ".join(str(inp.get("text") or "").split())
+    if not text:
+        return {"saved": False, "error": "Empty note. Nothing saved."}
+    if len(text) > NOTE_MAX_CHARS:
+        return {"saved": False, "error": f"Note is {len(text)} characters. Shorten it to under "
+                                         f"{NOTE_MAX_CHARS} and call remember again."}
+    if _INJURY_RE.search(text):
+        return {"saved": False, "error": "Injuries and health issues aren't notes. Not saved. "
+                                         "Use save_profile with issue instead."}
+    if _NUMBERS_RE.search(text):
+        return {"saved": False, "error": "Check-in numbers aren't notes. Not saved. "
+                                         "Use log_checkin for those."}
+
+    follow_up_on = None
+    if inp.get("follow_up_on"):
+        today = date.today()
+        try:
+            follow_up_on = date.fromisoformat(str(inp["follow_up_on"]))
+        except ValueError:
+            return {"saved": False, "error": f"follow_up_on {inp['follow_up_on']!r} isn't YYYY-MM-DD. Not saved."}
+        if not today <= follow_up_on <= today + timedelta(days=FOLLOW_UP_MAX_DAYS):
+            return {"saved": False, "error": (
+                f"follow_up_on {follow_up_on} must be between today ({today}) and a year from "
+                "now. Not saved. Work it out again from today's date."
+            )}
+
+    open_notes = db.query(Note).filter(Note.user_id == user_id, Note.resolved.is_(False)).all()
+    if any(n.text.lower() == text.lower() for n in open_notes):
+        return {"saved": False, "already_saved": True}
+    if len(open_notes) >= MAX_OPEN_NOTES:
+        return {"saved": False, "error": (
+            f"They already have {MAX_OPEN_NOTES} open notes, the most allowed. Not saved. "
+            "Resolve one that no longer matters first."
+        )}
+
+    note = Note(user_id=user_id, text=text, follow_up_on=follow_up_on)
+    db.add(note)
+    db.commit()
+    return {"saved": True, "note_id": note.note_id, "follow_up_on": str(follow_up_on) if follow_up_on else None}
+
+
+def _resolve_note(inp: dict, user_id: int, db: Session) -> dict:
+    user = db.get(User, user_id)
+    if not _onboarded(user):
+        return _NOT_ONBOARDED
+    note_id = parse_number(inp.get("note_id"))
+    note = db.get(Note, int(note_id)) if note_id is not None else None
+    # Another user's note looks the same as a missing one
+    if note is None or note.user_id != user_id:
+        return {"resolved": False, "error": f"No note {inp.get('note_id')!r}. Use an id from the context block."}
+    note.resolved = True
+    db.commit()
+    return {"resolved": True, "note_id": note.note_id}

@@ -1,7 +1,8 @@
 """Shared stats computed by code and handed to the model — never calculated by the AI."""
 from datetime import date, timedelta
+from typing import Optional
 from sqlalchemy.orm import Session
-from app.db.models import Checkin, User
+from app.db.models import Checkin, Milestone, User
 
 
 def compute(user_id: int, db: Session, today: date) -> dict:
@@ -75,3 +76,78 @@ def compute(user_id: int, db: Session, today: date) -> dict:
         "logged_today": logged_today,
         "user_state": "struggling" if struggling else "normal",
     }
+
+
+# --------------------------------------------------------------------------- #
+# Milestones                                                                    #
+# Worked out here, never by the model. A check-in milestone only counts if     #
+# today's check-in is the one that reached it, so a user who passed it before  #
+# milestones existed isn't congratulated late. Each is stored once it's been   #
+# handed to the model, so it never fires twice.                               #
+# --------------------------------------------------------------------------- #
+
+# In the order they're preferred when several land on the same day
+MILESTONES = {
+    "first_checkin": "their first check-in",
+    "first_kg":      "first 1kg moved toward their goal (3 weigh-in average vs start weight)",
+    "streak_7":      "7 days in a row logged",
+    "checkin_7":     "their 7th check-in",
+    "day_30":        "30 days since joining",
+}
+# Which way the weight has to move for the first_kg milestone. Other goals have none.
+_KG_DIRECTION = {"lose_fat": -1, "build_muscle": 1}
+_DAY_30_WINDOW = 7   # day_30 is still mentioned on the first visit up to a week late
+
+
+def reached_milestones(user_id: int, db: Session, today: date) -> list[str]:
+    """Milestones reached today and not yet stored, most preferred first."""
+    user = db.get(User, user_id)
+    stored = {m.kind for m in user.milestones}
+    checkins = (
+        db.query(Checkin)
+        .filter(Checkin.user_id == user_id, Checkin.date <= today)
+        .order_by(Checkin.date, Checkin.checkin_id)
+        .all()
+    )
+    dates = sorted({c.date for c in checkins})
+    logged_today = today in dates
+    reached = set()
+
+    if logged_today and len(dates) == 1:
+        reached.add("first_checkin")
+    if logged_today and len(dates) == 7:
+        reached.add("checkin_7")
+    run = 0
+    while today - timedelta(days=run) in dates:
+        run += 1
+    if run == 7:
+        reached.add("streak_7")
+    if 30 <= (today - user.joined_at.date()).days < 30 + _DAY_30_WINDOW:
+        reached.add("day_30")
+
+    # One weight per day (the latest), averaged over the last 3 weigh-ins so a
+    # single water-weight swing can't trigger it. Reached today means today's
+    # weigh-in took the average over 1kg when the average before it wasn't.
+    direction = _KG_DIRECTION.get(user.profile.goal if user.profile else None)
+    start = user.profile.start_weight if user.profile else None
+    by_day = {c.date: c.weight_kg for c in checkins if c.weight_kg is not None}
+    weights = [by_day[d] for d in sorted(by_day)]
+    if direction and start and today in by_day and len(weights) >= 3:
+        def moved(ws: list[float]) -> float:
+            return direction * (sum(ws[-3:]) / 3 - start)
+        before = weights[:-1]
+        if moved(weights) >= 1.0 and (len(before) < 3 or moved(before) < 1.0):
+            reached.add("first_kg")
+
+    return [k for k in MILESTONES if k in reached and k not in stored]
+
+
+def claim_milestone(user_id: int, db: Session, today: date) -> Optional[str]:
+    """Store every milestone reached today and return the one to mention, if any."""
+    kinds = reached_milestones(user_id, db, today)
+    if not kinds:
+        return None
+    for kind in kinds:
+        db.add(Milestone(user_id=user_id, kind=kind, reached_on=today))
+    db.commit()
+    return MILESTONES[kinds[0]]

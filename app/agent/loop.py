@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
 from app.db.models import RawMessage, User
-from app.agent.tools import TOOL_SCHEMAS, dispatch
+from app.agent.tools import ONBOARDING_STEPS, TOOL_SCHEMAS, dispatch
 from app.agent.context import build_system_prompt
 
 load_dotenv()
@@ -94,7 +94,7 @@ def _respond(user: User, message: str, raw_msg: RawMessage, db: Session) -> str:
 
     messages = _history(user.user_id, raw_msg.id, db) + [{"role": "user", "content": message}]
 
-    if user.onboarding_step < 7:
+    if user.onboarding_step < ONBOARDING_STEPS:
         return _onboard(user, messages, raw_msg, db)
     return _coach(user, message, messages, raw_msg, db)
 
@@ -152,7 +152,7 @@ def _onboard(user: User, messages: list, raw_msg: RawMessage, db: Session) -> st
     if user.blocked:
         _log("blocked", user.user_id)
         return BLOCKED_REPLY
-    if user.onboarding_step >= 7:
+    if user.onboarding_step >= ONBOARDING_STEPS:
         _log("onboarding_complete", user.user_id)
         return ONBOARDED_REPLY
 
