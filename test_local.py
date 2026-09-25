@@ -14,6 +14,7 @@ Usage:
     python3 test_local.py --model haiku     # Haiku for everything -> test_output_haiku.txt
     python3 test_local.py --model sonnet    # Sonnet for everything -> test_output_sonnet.txt
     python3 test_local.py --only priya      # run one persona
+    python3 test_local.py --only priya tom  # run several
     python3 test_local.py --only code       # code-level checks only, no model calls
     python3 test_local.py --list            # list personas
 """
@@ -1205,9 +1206,9 @@ def main() -> None:
     parser.add_argument("--model", default="haiku",
                         help=f"{' or '.join(MODELS)}, or a full model ID, for onboarding and "
                              "coaching alike (default: MODEL_ONBOARDING and MODEL_COACH)")
-    parser.add_argument("--only", choices=names + ["code"], metavar="PERSONA",
-                        help=f"run one persona ({', '.join(names)}), or code for the "
-                             "code-level checks only")
+    parser.add_argument("--only", nargs="+", choices=names + ["code"], metavar="PERSONA",
+                        help=f"run only these personas ({', '.join(names)}), and/or code "
+                             "for the code-level checks")
     parser.add_argument("--list", action="store_true", help="list personas and exit")
     args = parser.parse_args()
 
@@ -1227,8 +1228,8 @@ def main() -> None:
                         stream=sys.stdout, force=True)
     logging.getLogger("app.agent.loop").setLevel(logging.INFO)
 
-    selected = [p for p in PERSONAS if args.only in (None, p.name)]
-    rows = run_code_checks() if args.only in (None, "code") else []
+    selected = [p for p in PERSONAS if args.only is None or p.name in args.only]
+    rows = run_code_checks() if args.only is None or "code" in args.only else []
     for p in selected:
         rows.extend(run_persona(p))
 

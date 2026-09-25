@@ -30,7 +30,7 @@ in phase 2 and isn't in requirements.txt yet.
 
 - `python3 test_local.py`: every persona, Haiku onboarding plus Sonnet coaching,
   written to `test_output_split.txt`
-- `--only <persona>`: one persona. `--only code`: code-level checks only, no
+- `--only <persona> [<persona> ...]`: only those personas. `--only code`: code-level checks only, no
   model calls. `--list`: list personas.
 - `--model haiku|sonnet|<model id>`: one model for everything, written to
   `test_output_<model>.txt`
