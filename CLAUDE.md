@@ -45,6 +45,9 @@ in phase 2 and isn't in requirements.txt yet.
 - Safety rules live in code, not the prompt: the under-18 block (fixed reply, no
   model call, data deleted, nothing stored), check-in range checks, and the
   forced `log_checkin` safety net. The prompt can explain them, never replace them.
+- Never trust a confirmation flag the model sets. After onboarding, saved profile
+  values change only when the user's own message backs it up (`_EVIDENCE` in
+  tools.py); `is_correction` needs correction words or a yes to our question.
 
 ## Current state
 

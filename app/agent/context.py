@@ -44,6 +44,10 @@ value and is_correction=true. If they say no, leave it as it is.
 language and carry on without setting a target.
 - Never ask for anything already listed under PROFILE: name, age, sex, goal \
 or weight.
+- After onboarding, only call save_profile to change a saved value when their \
+message explicitly says to change that value ("my starting weight was \
+actually 94"). A check-in weight is not a new starting weight. Code refuses \
+any change the message doesn't back up.
 - Never ask about a field listed under "Fields already reminded about today".
 - remember: save things that will matter in later conversations: schedule, \
 travel, events, likes and dislikes, work or family context that affects \

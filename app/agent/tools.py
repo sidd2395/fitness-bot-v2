@@ -94,7 +94,8 @@ TOOL_SCHEMAS = [
             "Save lasting information: name, age, sex, goal, start weight, injuries, "
             "calorie/protein targets, disciplines, or trainer. Use during onboarding and "
             "when the user updates their profile. Not for daily numbers, use log_checkin for those. "
-            "Leave out any field the user did not answer."
+            "Leave out any field the user did not answer. After onboarding, a saved value only "
+            "changes if the person's message explicitly says so; code checks the message."
         ),
         "input_schema": {
             "type": "object",
@@ -136,10 +137,6 @@ TOOL_SCHEMAS = [
                         "words, e.g. 'keep up with my kids'. Any answer counts. Pass an empty "
                         "string if they aren't sure."
                     ),
-                },
-                "user_confirmed": {
-                    "type": "boolean",
-                    "description": "Must be true when changing a value that was previously saved.",
                 },
             },
         },
@@ -296,8 +293,21 @@ _YES_RE = re.compile(
 )
 
 
-def _signals_correction(raw_body: str) -> bool:
-    return bool(_CORRECTION_RE.search(raw_body) or _YES_RE.match(raw_body))
+def _signals_correction(raw_body: str, we_asked: bool) -> bool:
+    """An explicit correction in their words, or a yes to a question we asked."""
+    return bool(_CORRECTION_RE.search(raw_body) or (we_asked and _YES_RE.match(raw_body)))
+
+
+def _last_reply_asked(user_id: int, raw_msg_id: int, db: Session) -> bool:
+    """Whether our previous reply to this user ended in a question."""
+    prev = (
+        db.query(RawMessage.reply_text)
+        .filter(RawMessage.user_id == user_id, RawMessage.id < raw_msg_id,
+                RawMessage.reply_text.isnot(None))
+        .order_by(RawMessage.id.desc())
+        .first()
+    )
+    return bool(prev and "?" in prev.reply_text)
 
 
 def _log_checkin(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict:
@@ -323,7 +333,8 @@ def _log_checkin(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict:
 
     raw_msg = db.get(RawMessage, raw_msg_id)
     raw_body = raw_msg.body if raw_msg else ""
-    is_correction = bool(inp.get("is_correction")) and _signals_correction(raw_body)
+    is_correction = (bool(inp.get("is_correction"))
+                     and _signals_correction(raw_body, _last_reply_asked(user_id, raw_msg_id, db)))
 
     inp = dict(inp)
     rejected: dict = {}
@@ -532,6 +543,57 @@ def _profile(user: User, db: Session) -> Profile:
     return user.profile
 
 
+_LOCKED = (
+    "{field} is already saved and this message doesn't say to change it. Not changed. "
+    "Don't ask them about it; it only changes when they bring it up themselves."
+)
+
+
+def _numbers(text: str) -> list[float]:
+    """Every number in the text: digits ("94", "94.5") and number words ("sixteen")."""
+    found = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", text)]
+    # Longest first, whole words only, so "sixteen" isn't read as "six"
+    words = "|".join(sorted(list(_UNITS) + list(_TENS) + ["hundred"], key=len, reverse=True))
+    for run in re.findall(rf"\b(?:(?:{words})\b[\s-]*)+", text.lower()):
+        n = parse_number(run.strip(" -"))
+        if n is not None:
+            found.append(n)
+    return found
+
+
+def _says_number(text: str, value) -> bool:
+    n = parse_number(value)
+    return n is not None and any(abs(n - x) < 0.05 for x in _numbers(text))
+
+
+def _mentions(pattern: str):
+    return lambda text: bool(re.search(pattern, text, re.I))
+
+
+_START_WEIGHT_WORDS = _mentions(r"\b(start(ing|ed)?|original(ly)?|initial|first|signed up|joined)\b")
+_AGE_WORDS = _mentions(r"\b(i'?m|i am|age|aged|turned|turning|years? old|birthday)\b")
+_GOAL_CHANGE_WORDS = _mentions(r"\b(goal|focus|switch\w*|chang\w*|instead|rather|actually|now|aim)\b")
+
+# What the user's own message must contain before a saved value can change
+# after onboarding. Each takes (raw message, new value as the user gave it).
+_EVIDENCE = {
+    "name": lambda raw, v: bool(re.search(r"\b(name|call me|i'?m called|go by)\b", raw, re.I))
+                           and str(v).lower() in raw.lower(),
+    "age": lambda raw, v: _AGE_WORDS(raw) and _says_number(raw, v),
+    "sex": lambda raw, v: bool(re.search(r"\b(sex|gender|male|female|man|woman)\b", raw, re.I)),
+    "start_weight": lambda raw, v: _START_WEIGHT_WORDS(raw) and _says_number(raw, v),
+    "goal": lambda raw, v: _GOAL_CHANGE_WORDS(raw)
+                           and bool(re.search(rf"\b({_GOAL_WORDS[v]})\b", raw, re.I)),
+    "motivation": lambda raw, v: bool(re.search(
+        r"\b(reason|why i (started|start)|motivat\w*|started because|got me started|what made me)\b", raw, re.I)),
+    "calorie_target": lambda raw, v: bool(re.search(r"\b(calories?|kcal|cals?)\b", raw, re.I))
+                                     and _says_number(raw, v),
+    "protein_target_g": lambda raw, v: bool(re.search(r"\bprotein\b", raw, re.I)) and _says_number(raw, v),
+    "trainer_name": lambda raw, v: bool(re.search(r"\b(trainer|coach|pt)\b", raw, re.I)),
+    "disciplines": lambda raw, v: any(str(d).lower() in raw.lower() for d in v),
+}
+
+
 # Words that name each goal. An answer maps to a goal only if it names exactly one.
 _GOAL_WORDS = {
     "lose_fat":     r"lose|losing|fat|weight loss|lean|leaner|slim|cut|shred|drop",
@@ -580,6 +642,19 @@ def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict
     saved: dict = {}
     refused: dict = {}
 
+    # After onboarding, a saved value is locked: it only changes if this message
+    # explicitly talks about that field. Checked against the user's own words,
+    # never a flag the model sets.
+    onboarded = user.onboarding_step >= ONBOARDING_STEPS
+
+    def locked(field: str, current, new, evidence_value=None) -> bool:
+        if not onboarded or current is None or _same(current, new):
+            return False
+        if _EVIDENCE[field](raw_body, new if evidence_value is None else evidence_value):
+            return False
+        refused[field] = _LOCKED.format(field=field)
+        return True
+
     # Age first, before anything else is written. While the age question is open and
     # the model passed no age, read a bare answer like "16" or "sixteen" straight
     # from the message, so an under-18 answer is never missed.
@@ -590,6 +665,8 @@ def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict
         age = parse_number(age_in)
         if age is None or age != int(age) or not 0 < age < 120:
             refused["age"] = f"Couldn't read an age from {age_in!r}. Not saved. Ask again."
+        elif locked("age", user.age, int(age)):
+            pass
         elif not is_adult(int(age)):
             _block_minor(user, db)
             return {"saved": {}, "onboarding_blocked": True}
@@ -601,6 +678,8 @@ def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict
         name = inp["name"].strip(" \t!?.,")
         if not name or len(name) > 40 or any(c.isdigit() for c in name):
             refused["name"] = f"{inp['name']!r} doesn't look like a first name. Not saved. Ask again."
+        elif locked("name", user.name, name.title() if name.islower() else name, name):
+            pass
         else:
             user.name = name.title() if name.islower() else name
             saved["name"] = user.name
@@ -609,12 +688,18 @@ def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict
         sex = _SEX_WORDS.get(str(inp["sex"]).strip().lower())
         if sex is None:
             refused["sex"] = f"{inp['sex']!r} isn't M or F. Not saved. Ask again."
+        elif locked("sex", user.sex, sex):
+            pass
         else:
             user.sex = sex
             saved["sex"] = sex
 
     # Calorie floor — enforced in code, model must explain refusal
-    if "calorie_target" in inp:
+    # Targets come only from the person: after onboarding the number has to be
+    # in their message, even when no target was set before
+    if "calorie_target" in inp and onboarded and not _EVIDENCE["calorie_target"](raw_body, inp["calorie_target"]):
+        refused["calorie_target"] = _LOCKED.format(field="calorie_target")
+    elif "calorie_target" in inp:
         sex = user.sex
         floor = CALORIE_FLOOR.get(sex, 1200)  # conservative default when sex unknown
         if inp["calorie_target"] < floor:
@@ -639,6 +724,8 @@ def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict
         goal = parse_goal(goal_in)
         if goal is None:
             refused["goal"] = f"{goal_in!r} is not one of {', '.join(GOALS)}. Not saved. Ask again."
+        elif locked("goal", user.profile.goal if user.profile else None, goal):
+            pass
         else:
             _profile(user, db).goal = goal
             saved["goal"] = goal
@@ -646,21 +733,32 @@ def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict
     if inp.get("start_weight") not in (None, ""):
         kg = _to_kg(inp["start_weight"], inp.get("weight_unit"), raw_body)
         reason = _check_range("weight_kg", kg) if kg is not None else "Couldn't read a weight. Not saved. Ask again."
+        current = user.profile.start_weight if user.profile else None
         if reason:
             refused["start_weight"] = reason
+        elif locked("start_weight", current, kg, inp["start_weight"]):
+            pass
         else:
             _profile(user, db).start_weight = kg
             saved["start_weight_kg"] = kg
 
-    if "protein_target_g" in inp:
+    if "protein_target_g" in inp and onboarded and not _EVIDENCE["protein_target_g"](raw_body, inp["protein_target_g"]):
+        refused["protein_target_g"] = _LOCKED.format(field="protein_target_g")
+    elif "protein_target_g" in inp:
         _profile(user, db).protein_target_g = inp["protein_target_g"]
         saved["protein_target_g"] = inp["protein_target_g"]
 
-    if "disciplines" in inp:
+    current_disciplines = user.profile.disciplines if user.profile else None
+    if "disciplines" in inp and locked("disciplines", current_disciplines, ",".join(inp["disciplines"]),
+                                       inp["disciplines"]):
+        pass
+    elif "disciplines" in inp:
         _profile(user, db).disciplines = ",".join(inp["disciplines"])
         saved["disciplines"] = inp["disciplines"]
 
-    if "trainer_name" in inp:
+    if "trainer_name" in inp and locked("trainer_name", user.trainer_name, inp["trainer_name"] or None):
+        pass
+    elif "trainer_name" in inp:
         user.trainer_name = inp["trainer_name"] or None
         saved["trainer_name"] = inp["trainer_name"]
 
@@ -680,8 +778,10 @@ def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict
         motivation = " ".join(str(motivation or "").split())[:NOTE_MAX_CHARS]
         if _NO_REASON_RE.fullmatch(motivation):
             motivation = ""
-        _profile(user, db).motivation = motivation or None
-        saved["motivation"] = motivation
+        current = user.profile.motivation if user.profile else None
+        if not locked("motivation", current, motivation or None):
+            _profile(user, db).motivation = motivation or None
+            saved["motivation"] = motivation
 
     # Advance onboarding step past every question whose answer is now saved and valid.
     # Steps 5, 6 and 7 are "asked" steps: they advance when the question was answered,

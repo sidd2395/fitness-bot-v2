@@ -610,6 +610,12 @@ def _tom_safety_first(ctx: Ctx) -> CheckResult:
     return ok, f"back at {back and back.start()}, milestone at {milestone and milestone.start()}: {reply!r}"
 
 
+def _tom_start_weight(ctx: Ctx) -> CheckResult:
+    p = _user(ctx).profile
+    w = p.start_weight if p else None
+    return _near(w, 96.0, tol=0.01), f"start_weight={w}"
+
+
 def _tom_injury_not_in_notes(ctx: Ctx) -> CheckResult:
     bad = [n.text for n in _notes(ctx) if re.search(r"\b(back|surgery|injur\w*|spine)\b", n.text, re.I)]
     return not bad, f"injury notes: {bad}"
@@ -864,6 +870,7 @@ PERSONAS = [
             ("deadlift reply keeps the full back warning", _tom_warned),
             ("back warning comes before any milestone", _tom_safety_first),
             ("back injury is not in notes", _tom_injury_not_in_notes),
+            ("start_weight still 96.0 after his check-in", _tom_start_weight),
         ],
     ),
     Persona(
@@ -1026,11 +1033,43 @@ def _code_user_state(db) -> CheckResult:
     return ok, f"1-day-old, energy 4: {new_state}; 3-day-old, energy 1-2, short sleep: {low_state}"
 
 
+def _code_profile_locked(db) -> CheckResult:
+    """After onboarding, saved profile values change only when the user's own
+    message says so; a model-supplied confirmation flag counts for nothing."""
+    uid = _onboarded_user(db, goal="build_muscle", start_weight=96.0)
+
+    def save(body: str, inp: dict) -> dict:
+        m = RawMessage(user_id=uid, body=body)
+        db.add(m)
+        db.commit()
+        return dispatch("save_profile", inp, uid, m.id, db)
+
+    wrong = []
+    save("95kg 6h, want to do heavy deadlifts today", {"start_weight": 95, "user_confirmed": True})
+    if db.get(User, uid).profile.start_weight != 96.0:
+        wrong.append("check-in weight overwrote start_weight")
+    save("my starting weight was actually 94", {"start_weight": 94})
+    if db.get(User, uid).profile.start_weight != 94.0:
+        wrong.append("explicit starting-weight correction refused")
+    save("feeling strong today", {"goal": "lose_fat"})
+    if db.get(User, uid).profile.goal != "build_muscle":
+        wrong.append("goal changed without being asked")
+    save("my son is 16 and wants to train", {"age": 16})
+    u = db.get(User, uid)
+    if u.blocked or u.age != 30:
+        wrong.append("son's age changed the user's age")
+    save("sorry, I'm actually sixteen", {"age": 16})
+    if not db.get(User, uid).blocked:
+        wrong.append("explicit under-18 age after onboarding not blocked")
+    return not wrong, f"wrong: {wrong}"
+
+
 CODE_CHECKS = [
     ("31st open note is refused", _code_notes_cap),
     ("notes refuse injuries, past follow-ups, other users' ids", _code_note_rules),
     ("1kg milestone uses goal direction and 3 weigh-in average", _code_kg_milestone),
     ("new user isn't struggling; low energy and short sleep is from day one", _code_user_state),
+    ("profile locked after onboarding unless the message says to change it", _code_profile_locked),
 ]
 
 
