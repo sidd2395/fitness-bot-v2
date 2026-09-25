@@ -1,8 +1,9 @@
-from datetime import date, timedelta
+import re
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from sqlalchemy.orm import Session
 
-from app.db.models import Checkin, User
+from app.db.models import Checkin, RawMessage, User
 from app.agent.stats import compute as compute_stats
 from app.agent.tools import ONBOARDING_LABELS
 
@@ -28,6 +29,12 @@ sees, so warnings and advice go there, not in text next to a tool call.
 short replies like "yes", "no", "so what now" or "thanks".
 - If log_checkin returns rejected fields, those were not saved. Ask what \
 they meant, one field only.
+- Corrections: if they explicitly correct a value they already logged today \
+("actually 63.0 not 63.2", "sorry I meant 7h"), call log_checkin with the new \
+value and is_correction=true straight away. Don't ask them to confirm.
+- A new value that differs from one already logged today, with no sign it's a \
+correction (just "62.6" later on), is not a correction. Call log_checkin \
+without is_correction; it will come back as needs_confirmation.
 - If log_checkin returns needs_confirmation, those values were not changed. \
 Ask one short yes/no question naming the new value, like "Update today's \
 weight to 63.0?". Only when they say yes, call log_checkin again with the new \
@@ -37,7 +44,10 @@ value and is_correction=true. If they say no, leave it as it is.
 language and carry on without setting a target.
 - Never ask for anything already listed under PROFILE: name, age, sex, goal \
 or weight.
-- Never ask about a field listed under "Already asked today".\
+- Never ask about a field listed under "Already asked today".
+- Ask them for a check-in at most once a day: only when the context block says \
+"Check-in requested today: no" and nothing is logged today. Never ask for one \
+in a reply to thanks, small talk, or a message that isn't about their training.\
 """
 
 # --------------------------------------------------------------------------- #
@@ -200,6 +210,9 @@ def _context_block(user: User, db: Session) -> str:
         if field
     })
     lines.append(f"Already asked today: {', '.join(asked) if asked else 'nothing'}.")
+    # Whether any reply today (the "all set" reply included) asked for a check-in
+    requested = "yes, don't ask again today" if _checkin_requested_today(user.user_id, today, db) else "no"
+    lines.append(f"Check-in requested today: {requested}.")
 
     # --- Last 3 days -------------------------------------------------------- #
     if recent:
@@ -214,3 +227,39 @@ def _context_block(user: User, db: Session) -> str:
             lines.append(row)
 
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# Has a reply today already asked for a check-in?                              #
+# Worked out from the replies themselves, so it holds on days with no check-in #
+# row to hang nudged_fields on.                                                #
+# --------------------------------------------------------------------------- #
+
+_ASK_VERB = re.compile(
+    r"\b(send|share|log|drop|post|tell me|let me know|how did you|how'd you|what's your|what is your)\b",
+    re.I,
+)
+_ASK_WHAT = re.compile(r"\b(check[- ]?ins?|weigh[- ]?ins?|weight|sleep|slept|numbers)\b", re.I)
+
+
+def asks_for_checkin(text: str) -> bool:
+    """True if any sentence in the text asks them to send check-in data."""
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", text or ""):
+        if _ASK_VERB.search(sentence) and _ASK_WHAT.search(sentence):
+            return True
+    return False
+
+
+def _checkin_requested_today(user_id: int, today: date, db: Session) -> bool:
+    # created_at is UTC; local midnight converted to UTC marks the start of today
+    start = datetime.combine(today, time.min).astimezone(timezone.utc).replace(tzinfo=None)
+    replies = (
+        db.query(RawMessage.reply_text)
+        .filter(
+            RawMessage.user_id == user_id,
+            RawMessage.created_at >= start,
+            RawMessage.reply_text.isnot(None),
+        )
+        .all()
+    )
+    return any(asks_for_checkin(r.reply_text) for r in replies)

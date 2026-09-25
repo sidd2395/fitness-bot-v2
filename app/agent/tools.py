@@ -75,8 +75,10 @@ TOOL_SCHEMAS = [
                 "is_correction": {
                     "type": "boolean",
                     "description": (
-                        "Set true only after the user has said yes to changing a value "
-                        "already logged today."
+                        "Set true when the user explicitly corrects a value already logged "
+                        "today ('actually 63.0 not 63.2', 'sorry I meant 7h'), or says yes to "
+                        "your question about changing it. A new value with no sign of a "
+                        "correction is not a correction: leave this out."
                     ),
                 },
             },
@@ -226,6 +228,24 @@ def _check_range(field: str, value) -> Optional[str]:
     return None
 
 
+# A value that clashes with one already saved today only changes when the user
+# signalled it in this message: an explicit correction ("actually 63.0 not 63.2",
+# "sorry I meant 7h") or a yes to the confirmation question. The model setting
+# is_correction is not enough on its own.
+_CORRECTION_RE = re.compile(
+    r"\b(actually|meant|i mean|sorry|oops|typo|wrong|mistake|correction|misread)\b|\bnot\s+\d",
+    re.I,
+)
+_YES_RE = re.compile(
+    r"^\W*(y|yes|yeah|yep|yup|ya|yas|sure|ok|okay|correct|right|please|do it|go ahead|update it)\b",
+    re.I,
+)
+
+
+def _signals_correction(raw_body: str) -> bool:
+    return bool(_CORRECTION_RE.search(raw_body) or _YES_RE.match(raw_body))
+
+
 def _log_checkin(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict:
     user = db.get(User, user_id)
     if user.blocked or user.onboarding_step < 7 or not is_adult(user.age):
@@ -246,13 +266,17 @@ def _log_checkin(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict:
     today = date.today()
     target_date = today if inp.get("date", "today") == "today" else today - timedelta(days=1)
     entry_type = inp["entry_type"]
-    is_correction = inp.get("is_correction", False)
 
     DATA_FIELDS = ("weight_kg", "sleep_hours", "training", "energy", "calories", "protein_g", "water_l")
     NUDGE_FIELDS = ("weight_kg", "sleep_hours")
+    # Weight and sleep happen once a day, so a value in the day's other entry
+    # (morning vs evening) counts as already saved. Energy, training and food
+    # can differ between morning and evening.
+    ONCE_A_DAY = ("weight_kg", "sleep_hours")
 
     raw_msg = db.get(RawMessage, raw_msg_id)
     raw_body = raw_msg.body if raw_msg else ""
+    is_correction = bool(inp.get("is_correction")) and _signals_correction(raw_body)
 
     inp = dict(inp)
     rejected: dict = {}
@@ -272,40 +296,62 @@ def _log_checkin(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict:
                 rejected[field] = reason
                 del inp[field]
 
-    existing = (
+    same_day = (
         db.query(Checkin)
-        .filter(
-            Checkin.user_id == user_id,
-            Checkin.date == target_date,
-            Checkin.entry_type == entry_type,
-        )
-        .first()
+        .filter(Checkin.user_id == user_id, Checkin.date == target_date)
+        .all()
     )
+    existing = next((c for c in same_day if c.entry_type == entry_type), None)
 
-    # Never overwrite a value that is already there unless the user said yes to the
-    # change. Empty fields in an existing entry can still be filled in.
+    def holder(field: str) -> Optional[Checkin]:
+        """The row holding today's value for this field, if there is one."""
+        if existing is not None and getattr(existing, field) is not None:
+            return existing
+        if field in ONCE_A_DAY:
+            return next((c for c in same_day if getattr(c, field) is not None), None)
+        return None
+
+    # Never overwrite a value that is already there unless the user corrected it
+    # or said yes to the change. Empty fields can still be filled in.
     needs_confirmation: dict = {}
-    if existing and not is_correction:
-        for field in DATA_FIELDS:
-            new, old = inp.get(field), getattr(existing, field)
-            if new is None or old is None or _same(old, new):
-                continue
+    elsewhere: dict = {}   # corrections to a value held in the day's other entry
+    for field in DATA_FIELDS:
+        new = inp.get(field)
+        row = holder(field) if new is not None else None
+        if row is None:
+            continue
+        old = getattr(row, field)
+        if _same(old, new):
+            if row is not existing:
+                del inp[field]
+            continue
+        if not is_correction:
             needs_confirmation[field] = {"logged": old, "new": new}
+            del inp[field]
+        elif row is not existing:
+            elsewhere[field] = (row, new)
             del inp[field]
 
     to_write = {f: inp[f] for f in DATA_FIELDS if inp.get(f) is not None}
     if existing:
         to_write = {f: v for f, v in to_write.items() if not _same(getattr(existing, f), v)}
 
-    if not to_write:
+    if not to_write and not elsewhere:
         # Nothing new to save; don't create or touch a row
         result = {"saved": False, "date": str(target_date), "entry_type": entry_type}
-        if existing and not rejected and not needs_confirmation:
+        if same_day and not rejected and not needs_confirmation:
             result["already_logged"] = True
         _add_refusals(result, rejected, needs_confirmation)
         return result
 
-    if existing:
+    for field, (row, value) in elsewhere.items():
+        setattr(row, field, value)
+        row.corrected_at = datetime.utcnow()
+        row.raw_message = raw_body
+
+    if not to_write:
+        checkin = next(iter(elsewhere.values()))[0]
+    elif existing:
         overwritten = [f for f in to_write if getattr(existing, f) is not None]
         for field, value in to_write.items():
             setattr(existing, field, value)
@@ -322,15 +368,16 @@ def _log_checkin(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict:
             **to_write,
         )
         db.add(checkin)
+        same_day.append(checkin)
 
     db.flush()  # populate checkin_id before linking
 
     # Read from the row, not the input, so a correction that only changes one
     # field doesn't report the untouched fields as missing. Rejected fields are
     # reported under "rejected" instead.
-    fields_saved   = list(to_write)
+    fields_saved   = list(to_write) + list(elsewhere)
     fields_missing = [f for f in NUDGE_FIELDS
-                      if getattr(checkin, f) is None and f not in rejected]
+                      if all(getattr(c, f) is None for c in same_day) and f not in rejected]
 
     # Record what the model is about to remind them about, so the context block
     # can list it under "Already asked today" and the bot never asks twice
@@ -370,10 +417,10 @@ def _add_refusals(result: dict, rejected: dict, needs_confirmation: dict) -> Non
     if needs_confirmation:
         result["needs_confirmation"] = needs_confirmation
         result["message"] = (
-            "These fields already have a value today and were NOT changed. Ask one short "
-            "yes/no question naming the new value, like 'Update today's weight to 63.0?'. "
-            "Only after they say yes, call log_checkin again with the new value and "
-            "is_correction=true."
+            "These fields already have a value today and were NOT changed, because the "
+            "message didn't say it was a correction. Ask one short yes/no question naming "
+            "the new value, like 'Update today's weight to 63.0?'. Only after they say yes, "
+            "call log_checkin again with the new value and is_correction=true."
         )
 
 

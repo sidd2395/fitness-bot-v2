@@ -54,6 +54,7 @@ from sqlalchemy import func, select  # noqa: E402
 from app.db.session import SessionLocal, engine  # noqa: E402
 from app.db.models import Base, Checkin, RawMessage, User  # noqa: E402
 from app.db import delete_user  # noqa: E402
+from app.agent.context import asks_for_checkin  # noqa: E402
 from app.agent.loop import (  # noqa: E402
     BLOCKED_REPLY, MODEL_COACH, MODEL_ONBOARDING, ONBOARDED_REPLY, WELCOME_REPLY, run,
 )
@@ -287,7 +288,7 @@ def _priya_final_weight(ctx: Ctx) -> CheckResult:
     c = _latest_weighed(ctx)
     if c is None:
         return False, "no check-in with a weight"
-    return (_near(c.weight_kg, 63.0) and c.corrected_at is not None,
+    return (_near(c.weight_kg, 62.6) and c.corrected_at is not None,
             f"weight={c.weight_kg} corrected_at={c.corrected_at}")
 
 
@@ -298,9 +299,19 @@ def _priya_field(attr: str, expected) -> Callable[[Ctx], CheckResult]:
     return check
 
 
-def _priya_before_yes(ctx: Ctx) -> CheckResult:
-    w = ctx.marks.get("before_yes")
-    return _near(w, 63.2), f"weight before yes={w}"
+def _priya_marked(key: str, expected: float) -> Callable[[Ctx], CheckResult]:
+    def check(ctx: Ctx) -> CheckResult:
+        w = ctx.marks.get(key)
+        return _near(w, expected), f"{key}: weight={w}"
+    return check
+
+
+def _priya_asks_to_confirm(ctx: Ctx) -> CheckResult:
+    """The reply to a bare '62.6' asks a question naming 62.6."""
+    replies = [s.reply for s in ctx.sent if s.message == "62.6"]
+    reply = replies[-1] if replies else ""
+    questions = re.findall(r"[^.!?\n]*\?", reply)
+    return any("62.6" in q for q in questions), f"reply: {reply!r}"
 
 
 def _blocked(ctx: Ctx) -> CheckResult:
@@ -405,6 +416,12 @@ def _nadia_no_prompt_leak(ctx: Ctx) -> CheckResult:
     return not leaked, f"leaked on: {leaked}"
 
 
+def _nadia_asked_once(ctx: Ctx) -> CheckResult:
+    """After onboarding, at most one reply asks her for a check-in."""
+    asks = [s.message for s in ctx.sent if s.onboarded_before and asks_for_checkin(s.reply)]
+    return len(asks) <= 1, f"check-in asked in replies to: {asks}"
+
+
 def _deletion_ran(ctx: Ctx) -> CheckResult:
     return ctx.marks.get("deleted") is True, f"delete_user returned {ctx.marks.get('deleted')}"
 
@@ -435,13 +452,17 @@ PERSONAS = [
             "hey", "priya", "34", "f", "63.5", "lose fat i guess", "nope", "no",
             "63.2 slept 7.5 upper body today feeling good",
             "actually 63.0 not 63.2",
+            mark_weight("after_correction"),
+            "62.6",
             mark_weight("before_yes"),
             "yes",
         ],
         checks=[
             ("onboarding complete", onboarding_complete),
-            ("weight still 63.2 before she says yes", _priya_before_yes),
-            ("weight ends at 63.0 with corrected_at", _priya_final_weight),
+            ("explicit correction saves 63.0 straight away", _priya_marked("after_correction", 63.0)),
+            ("bare 62.6 leaves weight at 63.0", _priya_marked("before_yes", 63.0)),
+            ("reply to bare 62.6 asks her to confirm", _priya_asks_to_confirm),
+            ("weight ends at 62.6 with corrected_at", _priya_final_weight),
             ("sleep 7.5", _priya_field("sleep_hours", 7.5)),
             ("energy 4", _priya_field("energy", 4)),
             ("all raw messages processed with reply", all_raw_processed),
@@ -546,6 +567,7 @@ PERSONAS = [
             ("no check-ins from last four messages", _nadia_no_new_checkins),
             ("all raw messages processed with reply", all_raw_processed),
             ("no reply contains RULES or COACHING", _nadia_no_prompt_leak),
+            ("at most one reply asks for a check-in", _nadia_asked_once),
         ],
     ),
     Persona(

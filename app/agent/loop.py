@@ -188,12 +188,9 @@ def _coach(user: User, message: str, messages: list, raw_msg: RawMessage, db: Se
                 # model at least sees its tool was refused
                 tool_results.append(_tool_result(block.id, {"error": "tool call limit reached"}))
                 continue
-            inp = block.input
-            if force_checkin:
-                # A forced call is never a correction: overwriting a value
-                # needs the user's yes, so is_correction is dropped
-                inp = {k: v for k, v in inp.items() if k != "is_correction"}
-            result = dispatch(block.name, inp, user_id, raw_msg.id, db)
+            # is_correction is honoured only if the message itself says it's a
+            # correction or a yes (checked in log_checkin), forced call or not
+            result = dispatch(block.name, block.input, user_id, raw_msg.id, db)
             tool_results.append(_tool_result(block.id, result))
             tool_calls_used += 1
             saved_this_turn = saved_this_turn or bool(result.get("saved"))
