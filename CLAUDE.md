@@ -1,8 +1,7 @@
 # Coach Reyes
 
 A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
-(no LangChain), SQLAlchemy and Alembic. FastAPI arrives with the Telegram webhook
-in phase 2 and isn't in requirements.txt yet.
+(no LangChain), SQLAlchemy, Alembic and FastAPI (the Telegram webhook).
 
 ## File map
 
@@ -22,7 +21,16 @@ in phase 2 and isn't in requirements.txt yet.
 - `app/pricing.py`: price per million tokens for each model (input, output,
   cache read, cache write). Every model call logs its token counts
   (`event=usage`); `test_local.py` ends with a cost summary from these.
-- `app/db/`: models (incl. `notes`, `milestones`), session, `delete_user`.
+- `app/telegram/handler.py`: `handle_update`, shared by polling and the webhook.
+  Allowlist, duplicate update ids (`telegram_updates`), rate limit, text only,
+  commands, consent (no user row until "I agree"), daily cap, then `run()`.
+  `replies.py` holds its fixed replies, `mydata.py` the /mydata text, `api.py`
+  the Bot API calls and message splitting.
+- `app/main.py`: FastAPI. `POST /telegram/webhook` (secret header or 401,
+  handled in a background task), `GET /health`, migrations on startup.
+- `app/logs.py`: JSON logs in prod. Never log message text, replies, names or keys.
+- `app/db/`: models (incl. `notes`, `milestones`), session (`database_url()`
+  converts Railway's postgres://), `delete_user`, `migrate.upgrade_head`.
 - `alembic/versions/`: migrations. The test DB is built from these.
 - `test_local.py`: persona tests with real model calls, against `test.db`.
 
@@ -35,6 +43,9 @@ in phase 2 and isn't in requirements.txt yet.
 - `--model haiku|sonnet|<model id>`: one model for everything, written to
   `test_output_<model>.txt`
 - `python3 -m alembic upgrade head`: migrate `fitness.db`
+- `python3 run_polling.py`: the bot on Telegram over long polling, local db.
+  Removes any webhook; `python3 scripts/set_webhook.py <https url>` puts it back.
+- Railway: `railway.json` runs `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
 
 ## Rules
 
@@ -64,32 +75,19 @@ in phase 2 and isn't in requirements.txt yet.
 
 ## Current state
 
-Phase 1, the local agent, is built, plus the personal-coaching batch
-(motivation, notes, milestones, length matching) and cost tracking, with
-Sonnet 5 and Haiku 4.5 prices filled in. Last full run: 172/173. Fixed since,
-not yet checked by a persona run (the last run, `--only code`, passed 5/5):
-- Only the final text of a turn is sent; text written alongside a tool call
-  is a draft, used only if the final text is empty
-- log_checkin returns weight_change (since the last weigh-in, computed in
-  code); the coach may only state changes it's given
-- Check-in invitations: before the first ever check-in, one gentle invitation
-  per reply; after it, once a day ("Already asked today: ..."). The test
-  transcript prints that line on every coaching turn
-- With an active issue, a milestone goes at the end of the reply, after any
-  safety point
-- coach.md: no training plans, programmes or schedules, never offered
-- Profile values are locked after onboarding unless the user's message backs
-  the change (`_EVIDENCE`); `user_confirmed` is gone from `save_profile`, and
-  number words match whole words ("sixteen" is 16)
-- `--only` takes several personas
+Phase 1 is built and passed its last full run, 187/187. Since then the
+short-sleep run is computed in code (sam 22/22).
+
+Phase 2, part 1 is built and passes the code-level checks, but hasn't been
+tried on a phone yet: Telegram layer, polling, webhook, allowlist, consent,
+/help /mydata /delete, 40 turns a day, 2s rate limit, JSON logs, Postgres URL.
+Not yet checked against a real Postgres.
 
 ## Next: phase 2
 
-- Telegram webhook (FastAPI) with a webhook secret
-- Railway plus Postgres, Singapore region
-- Consent message before onboarding
-- `/delete` and `/mydata` commands
-- Rate limit, and a daily cap of 40 turns per user
+- Try it on a phone with polling, then deploy: Railway plus Postgres,
+  Singapore region, `TZ=Asia/Singapore` (check-in dates use the server's
+  local date)
 - Evening check-in
 - `/mydata` must include notes, motivation and milestones, and `/delete` must
   wipe them (the ORM cascade in `delete_user` already covers notes and
