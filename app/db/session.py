@@ -5,7 +5,19 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-DATABASE_URL = os.environ.get("DATABASE_URL") or "sqlite:///./fitness.db"
+
+
+def database_url() -> str:
+    """DATABASE_URL, with Railway's postgres:// (and plain postgresql://) pointed at
+    the psycopg 3 driver; SQLAlchemy would otherwise look for psycopg2."""
+    url = os.environ.get("DATABASE_URL") or "sqlite:///./fitness.db"
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url[len(prefix):]
+    return url
+
+
+DATABASE_URL = database_url()
 
 connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 

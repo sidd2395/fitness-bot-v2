@@ -1,4 +1,3 @@
-import os
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
@@ -16,7 +15,8 @@ target_metadata = Base.metadata
 
 
 def _url() -> str:
-    return os.environ.get("DATABASE_URL") or "sqlite:///./fitness.db"
+    from app.db.session import database_url
+    return database_url()
 
 
 def run_migrations_offline() -> None:
