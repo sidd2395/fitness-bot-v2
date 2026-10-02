@@ -1,7 +1,7 @@
 """Fixed Telegram replies, sent from code with no model call."""
 
 CONSENT_NOTICE = (
-    "Hi, I'm Coach Reyes, an AI fitness coach. I'll check in with you each day and "
+    "Hi, I'm Coach Bob, an AI fitness coach. I'll check in with you each day and "
     "help you stay on track.\n\n"
     "Before we start, how your data is used:\n"
     "• I store your profile, check-ins and notes so I can coach you.\n"
@@ -13,7 +13,7 @@ CONSENT_NOTICE = (
 AGREE_BUTTON = ("I agree", "consent")
 AFTER_CONSENT = "Thanks. To start, what's your first name?"
 
-NOT_ALLOWED = "Coach Reyes is in private beta."
+NOT_ALLOWED = "Coach Bob is in private beta."
 TEXT_ONLY = "I can only read text for now."
 SLOW_DOWN = "One at a time please. Give me a second with your last message."
 DAILY_CAP = (
@@ -24,7 +24,7 @@ ERROR_REPLY = "Sorry, something went wrong on my side. Try sending that again in
 UNKNOWN_COMMAND = "I don't know that command. /help lists what I can do."
 
 HELP = (
-    "I'm Coach Reyes, an AI fitness coach. Send me a daily check-in, something like "
+    "I'm Coach Bob, an AI fitness coach. Send me a daily check-in, something like "
     "\"82kg, slept 7h, legs today\", and I'll keep track and coach you from it. You can "
     "also just tell me how training's going or ask a question.\n\n"
     "Commands:\n"

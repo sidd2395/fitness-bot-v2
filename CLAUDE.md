@@ -1,4 +1,4 @@
-# Coach Reyes
+# Coach Bob
 
 A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
 (no LangChain), SQLAlchemy, Alembic and FastAPI (the Telegram webhook).

@@ -44,7 +44,7 @@ def main() -> None:
         return
 
     if not args.base_url or not args.base_url.startswith("https://"):
-        parser.error("give the app's https URL, e.g. https://coach-reyes.up.railway.app")
+        parser.error("give the app's https URL, e.g. https://coach-bob.up.railway.app")
     secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET", "")
     if not secret:
         sys.exit("TELEGRAM_WEBHOOK_SECRET is empty. Set it here and on Railway (same value).")

@@ -29,7 +29,7 @@ HISTORY_WINDOW = timedelta(hours=24)
 
 # Fixed replies, sent from code with no model call
 WELCOME_REPLY = (
-    "Hi, I'm Coach Reyes, an AI fitness coach. I'll check in with you each day and "
+    "Hi, I'm Coach Bob, an AI fitness coach. I'll check in with you each day and "
     "help you stay on track. To start, what's your first name?"
 )
 BLOCKED_REPLY = (
