@@ -1320,6 +1320,37 @@ def _code_tg_daily_cap(db) -> CheckResult:
                 f"fast={fast!r}, photo={photo!r}")
 
 
+class FakeHTTP:
+    """Stands in for httpx.Client: records each request, answers ok with `result`."""
+
+    def __init__(self, result):
+        self.result = result
+        self.requests: list = []   # (url, json body, kwargs)
+
+    def post(self, url, json=None, **kwargs):
+        self.requests.append((url, json, kwargs))
+        return SimpleNamespace(json=lambda: {"ok": True, "result": self.result})
+
+
+def _code_tg_get_updates(db) -> CheckResult:
+    """get_updates sends Telegram's long-poll timeout in the body and a longer HTTP
+    timeout on the request, through the real TelegramAPI.call; error text masks the token."""
+    from app.telegram.api import TelegramAPI, safe_message
+
+    token = "123456789:" + "A" * 35
+    http = FakeHTTP([{"update_id": 7}])
+    try:
+        updates = TelegramAPI(token=token, http=http).get_updates(offset=5, wait=30)
+    except Exception as e:
+        return False, f"get_updates raised {type(e).__name__}: {e}"
+    url, body, kwargs = http.requests[0]
+    masked = safe_message(RuntimeError(f"error for url https://api.telegram.org/bot{token}/getUpdates"))
+    ok = (updates == [{"update_id": 7}] and url.endswith("/getUpdates")
+          and body == {"timeout": 30, "offset": 5, "allowed_updates": ["message", "callback_query"]}
+          and kwargs == {"timeout": 40} and token not in masked)
+    return ok, f"body={body}, http kwargs={kwargs}, masked={masked!r}"
+
+
 CODE_CHECKS = [
     ("31st open note is refused", _code_notes_cap),
     ("notes refuse injuries, past follow-ups, other users' ids", _code_note_rules),
@@ -1333,6 +1364,7 @@ CODE_CHECKS = [
     ("telegram: no onboarding before consent", _code_tg_consent_first),
     ("telegram: /delete confirms, then wipes everything", _code_tg_delete),
     ("telegram: daily cap at 41, rate limit, text only", _code_tg_daily_cap),
+    ("telegram: get_updates through a fake HTTP client", _code_tg_get_updates),
 ]
 
 

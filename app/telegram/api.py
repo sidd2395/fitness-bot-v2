@@ -1,6 +1,7 @@
 """The few Telegram Bot API calls the bot makes. Plain text only, no parse_mode,
 so nothing the model writes is read as markup."""
 import os
+import re
 from typing import Optional
 
 import httpx
@@ -18,13 +19,15 @@ class TelegramError(Exception):
 
 
 class TelegramAPI:
-    def __init__(self, token: Optional[str] = None, timeout: float = 15.0):
+    def __init__(self, token: Optional[str] = None, http_timeout: float = 15.0, http=None):
         token = token or os.environ["TELEGRAM_BOT_TOKEN"]
         self._base = f"https://api.telegram.org/bot{token}/"
-        self._http = httpx.Client(timeout=timeout)
+        self._http = http or httpx.Client(timeout=http_timeout)
 
-    def call(self, method: str, timeout: Optional[float] = None, **params) -> dict:
-        kwargs = {"timeout": timeout} if timeout is not None else {}
+    def call(self, method: str, http_timeout: Optional[float] = None, **params) -> dict:
+        """params go to Telegram as JSON. http_timeout is ours, for the request
+        itself; Telegram has its own `timeout` param (getUpdates' long poll)."""
+        kwargs = {"timeout": http_timeout} if http_timeout is not None else {}
         data = self._http.post(self._base + method, json=params, **kwargs).json()
         if not data.get("ok"):
             raise TelegramError(method, data.get("error_code"), data.get("description", ""))
@@ -58,7 +61,17 @@ class TelegramAPI:
         params = {"timeout": wait, "allowed_updates": ["message", "callback_query"]}
         if offset is not None:
             params["offset"] = offset
-        return self.call("getUpdates", timeout=wait + 10, **params)
+        # The request has to outlast Telegram's long poll
+        return self.call("getUpdates", http_timeout=wait + 10, **params)
+
+
+_TOKEN_IN_TEXT = re.compile(r"\d{5,}:[A-Za-z0-9_-]{20,}")
+
+
+def safe_message(exc: BaseException) -> str:
+    """An exception's type and message, with anything shaped like a bot token
+    masked: some httpx errors quote the request URL, which contains it."""
+    return f"{type(exc).__name__}: {_TOKEN_IN_TEXT.sub('<token>', str(exc))}"
 
 
 def _units(text: str) -> int:

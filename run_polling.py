@@ -15,7 +15,7 @@ load_dotenv()
 
 from app.db.migrate import upgrade_head  # noqa: E402
 from app.logs import setup_logging  # noqa: E402
-from app.telegram.api import TelegramAPI  # noqa: E402
+from app.telegram.api import TelegramAPI, safe_message  # noqa: E402
 from app.telegram.handler import allowed_ids, handle_update  # noqa: E402
 
 logger = logging.getLogger("app.polling")
@@ -39,8 +39,12 @@ def main() -> None:
             updates = api.get_updates(offset)
         except KeyboardInterrupt:
             raise
-        except Exception:
-            logger.warning("event=poll_failed", exc_info=True, extra={"event": "poll_failed"})
+        except Exception as e:
+            # Type and message (token masked) plus the stack. A failed poll carries
+            # no update, so there's no message content to leak.
+            detail = safe_message(e)
+            logger.warning("event=poll_failed detail=%s", detail, exc_info=True,
+                           extra={"event": "poll_failed", "detail": detail})
             time.sleep(5)
             continue
         for update in updates:
