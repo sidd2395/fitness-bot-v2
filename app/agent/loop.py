@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -12,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.db.models import RawMessage, User
 from app.agent.tools import ONBOARDING_STEPS, TOOL_SCHEMAS, dispatch
 from app.agent.context import build_system_prompt
-from app.pricing import usage_counts
+from app.pricing import cost_usd, usage_counts
 
 load_dotenv()
 
@@ -99,7 +100,10 @@ def run(user_id: int, message: str, db: Session) -> str:
 
 
 def _respond(user: User, message: str, raw_msg: RawMessage, db: Session) -> str:
-    if user.onboarding_step == 0 and _is_first_message(user.user_id, raw_msg.id, db):
+    # On Telegram the welcome goes out with the consent notice, and the tap on
+    # "I agree" asks for their name, so a consented user's first message is the answer
+    if (user.onboarding_step == 0 and user.consent_given_at is None
+            and _is_first_message(user.user_id, raw_msg.id, db)):
         _log("welcome", user.user_id)
         return WELCOME_REPLY
 
@@ -301,6 +305,7 @@ def _call(model: str, user_id: int, system: list, messages: list,
           tool_choice: Optional[dict] = None, max_tokens: int = 1024,
           tools: Optional[list] = None):
     kwargs = {"tool_choice": tool_choice} if tool_choice else {}
+    started = time.monotonic()
     response = _client.messages.create(
         model=model,
         max_tokens=max_tokens,
@@ -316,21 +321,29 @@ def _call(model: str, user_id: int, system: list, messages: list,
     # so an empty reply can be traced to its cause
     blocks = ",".join(b.type for b in response.content) or "none"
     _log("model_call", user_id, f"model={model} stop={response.stop_reason} blocks={blocks}")
-    _record_usage(user_id, model, response.usage)
+    _record_usage(user_id, model, response.usage, round((time.monotonic() - started) * 1000))
     if any(b.type in ("thinking", "redacted_thinking") for b in response.content):
         # Thinking is disabled on every call, so this shouldn't happen. The
         # request id lets Anthropic look the call up.
+        request_id = getattr(response, "_request_id", None)
         logger.warning("event=unexpected_thinking user_id=%d model=%s request_id=%s",
-                       user_id, model, getattr(response, "_request_id", None))
+                       user_id, model, request_id,
+                       extra={"event": "unexpected_thinking", "user_id": user_id, "model": model,
+                              "detail": f"request_id={request_id}"})
     return response
 
 
-def _record_usage(user_id: int, model: str, usage) -> None:
-    """Token counts for one call, for cost tracking. Prices live in app/pricing.py."""
+def _record_usage(user_id: int, model: str, usage, latency_ms: Optional[int] = None) -> None:
+    """Token counts, cost and latency for one call. Prices live in app/pricing.py."""
     c = usage_counts(usage)
+    cost = cost_usd(model, c)
     _log("usage", user_id,
          f"model={model} input={c['input_tokens']} output={c['output_tokens']} "
-         f"cache_read={c['cache_read_input_tokens']} cache_write={c['cache_creation_input_tokens']}")
+         f"cache_read={c['cache_read_input_tokens']} cache_write={c['cache_creation_input_tokens']}",
+         model=model, input_tokens=c["input_tokens"], output_tokens=c["output_tokens"],
+         cache_read_tokens=c["cache_read_input_tokens"],
+         cache_write_tokens=c["cache_creation_input_tokens"],
+         cost_usd=round(cost, 6) if cost is not None else None, latency_ms=latency_ms)
 
 
 def _run_tools(response, user_id: int, raw_msg_id: int, db: Session,
@@ -382,6 +395,8 @@ def clean_style(text: str) -> str:
     return text.strip()
 
 
-def _log(event: str, user_id: int, detail: str = "") -> None:
-    # Event type and user id only — never message content or tool arguments
-    logger.info("event=%s user_id=%d detail=%s", event, user_id, detail)
+def _log(event: str, user_id: int, detail: str = "", **fields) -> None:
+    # Event type, user id and numbers only, never message content or tool arguments.
+    # The fields also go in `extra`, so JSON logs carry them as keys (app/logs.py).
+    logger.info("event=%s user_id=%d detail=%s", event, user_id, detail,
+                extra={"event": event, "user_id": user_id, "detail": detail, **fields})

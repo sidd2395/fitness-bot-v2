@@ -90,8 +90,8 @@ _USAGE_LOG: list = []
 _real_record_usage = agent_loop._record_usage
 
 
-def _recording_usage(user_id, model, usage):
-    _real_record_usage(user_id, model, usage)
+def _recording_usage(user_id, model, usage, latency_ms=None):
+    _real_record_usage(user_id, model, usage, latency_ms)
     _USAGE_LOG.append((model, usage_counts(usage)))
 
 
