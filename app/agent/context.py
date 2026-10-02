@@ -4,7 +4,8 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.db.models import Checkin, Note, RawMessage, User
-from app.agent.stats import claim_milestone, compute as compute_stats, weight_change_since_last
+from app.agent.stats import (claim_milestone, compute as compute_stats, describe_sleep_run,
+                             weight_change_since_last)
 from app.agent.tools import ONBOARDING_LABELS, ONBOARDING_STEPS
 
 # --------------------------------------------------------------------------- #
@@ -242,8 +243,10 @@ def _context_block(user: User, db: Session) -> str:
         delta = s["weight_change_7d"]
         sign = "+" if delta > 0 else ""
         lines.append(f"Weight: {sign}{delta}kg over 7 days.")
-    if s["short_sleep_streak"] > 0:
-        lines.append(f"Short sleep: {s['short_sleep_streak']} nights running.")
+    # The only sleep counts the coach may use
+    sleep_text = describe_sleep_run(s["sleep_run"])
+    if sleep_text:
+        lines.append(f"Short sleep: {sleep_text}")
     lines.append(f"Today: {s['logged_today']}.")
     lines.append(f"State: {s['user_state']}.")
     # Stored as it's handed over, so it shows on this turn only

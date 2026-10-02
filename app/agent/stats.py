@@ -46,15 +46,8 @@ def compute(user_id: int, db: Session, today: date) -> dict:
         if older:
             weight_change_7d = round(latest_w - older[-1], 2)
 
-    # Consecutive short-sleep nights (< 6 h), counting from most recent
-    short_sleep = 0
-    for c in sorted(checkins, key=lambda x: x.date, reverse=True):
-        if c.sleep_hours is None:
-            continue
-        if c.sleep_hours < 6:
-            short_sleep += 1
-        else:
-            break
+    run = short_sleep_run(checkins, today)
+    short_sleep = run["nights_under_6h"] if run else 0
 
     # What was logged today
     today_types = {c.entry_type for c in checkins if c.date == today}
@@ -83,6 +76,7 @@ def compute(user_id: int, db: Session, today: date) -> dict:
         "days_since_last_checkin": days_since_last,
         "weight_change_7d": weight_change_7d,
         "short_sleep_streak": short_sleep,
+        "sleep_run": run,
         "logged_today": logged_today,
         "user_state": "struggling" if struggling else "normal",
     }
@@ -113,6 +107,56 @@ def weight_change_since_last(user_id: int, db: Session, on: date) -> Optional[di
         "direction": "up" if change > 0 else "down" if change < 0 else "same",
         "days_between": (on - prev).days,
     }
+
+
+def short_sleep_run(checkins, on: date) -> Optional[dict]:
+    """Consecutive nights under 6h and under 5h, ending on the latest night
+    logged on or before this date, with the actual hours. Worked out here so the
+    model never counts nights itself. One sleep value per day (the latest entry);
+    a day with no sleep logged ends the run. None if no sleep is logged."""
+    by_day = {}
+    for c in sorted(checkins, key=lambda x: (x.date, x.checkin_id or 0)):
+        if c.sleep_hours is not None and c.date <= on:
+            by_day[c.date] = c.sleep_hours
+    if not by_day:
+        return None
+    day = max(by_day)
+    hours = []
+    while day in by_day and by_day[day] < 6:
+        hours.append(by_day[day])
+        day -= timedelta(days=1)
+    under_5 = 0
+    for h in hours:
+        if h >= 5:
+            break
+        under_5 += 1
+    return {
+        "last_night_hours": by_day[max(by_day)],
+        "last_night_date": max(by_day),
+        "nights_under_6h": len(hours),
+        "nights_under_5h": under_5,
+        "hours_oldest_first": list(reversed(hours)),
+    }
+
+
+def describe_sleep_run(run: Optional[dict]) -> Optional[str]:
+    """The one wording of the short-sleep run, shared by the log_checkin result
+    and the context block. None when there's no short sleep to report."""
+    if not run or run["nights_under_6h"] == 0:
+        return None
+    hours = ", ".join(f"{h:g}h" for h in run["hours_oldest_first"])
+    n6, n5 = run["nights_under_6h"], run["nights_under_5h"]
+    if n6 == 1:
+        text = f"1 night under 6h ({hours})"
+    else:
+        text = f"{n6} nights in a row under 6h ({hours}, oldest first)"
+    if n5 == 0:
+        text += ", none under 5h"
+    elif n5 == n6:
+        text += ", under 5h" if n6 == 1 else f", all {n5} under 5h"
+    else:
+        text += f", only the last {n5} under 5h" if n5 > 1 else ", only the last one under 5h"
+    return text + "."
 
 
 # --------------------------------------------------------------------------- #

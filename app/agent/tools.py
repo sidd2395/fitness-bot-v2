@@ -4,7 +4,8 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.db.models import Checkin, Issue, Note, Profile, RawMessage, User
-from app.agent.stats import claim_milestone, compute as compute_stats, weight_change_since_last
+from app.agent.stats import (claim_milestone, compute as compute_stats, describe_sleep_run,
+                             weight_change_since_last)
 
 CALORIE_FLOOR = {"M": 1500, "F": 1200}
 
@@ -450,6 +451,9 @@ def _log_checkin(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict:
     db.commit()
 
     stats = compute_stats(user_id, db, today)
+    # The raw run stays in code; the model gets the one wording of it
+    sleep_run = stats.pop("sleep_run")
+    stats.pop("short_sleep_streak")
     milestone = claim_milestone(user_id, db, today)
 
     result = {
@@ -475,6 +479,10 @@ def _log_checkin(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict:
             result["weight_change"] = change
         else:
             result["weight_change"] = "first weigh-in, no earlier weight to compare"
+    # Sleep saved: the short-sleep run, counted here so the model never counts nights
+    if "sleep_hours" in fields_saved:
+        result["sleep_run"] = (describe_sleep_run(sleep_run)
+                               or "no short-sleep run: the latest night was 6h or more")
     _add_refusals(result, rejected, needs_confirmation)
     return result
 

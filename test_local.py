@@ -61,7 +61,8 @@ from app.agent.context import asks_for_checkin, checkin_asks, checkin_request_li
 from app.agent.loop import (  # noqa: E402
     BLOCKED_REPLY, MODEL_COACH, MODEL_ONBOARDING, ONBOARDED_REPLY, WELCOME_REPLY, run,
 )
-from app.agent.stats import compute as compute_stats, reached_milestones  # noqa: E402
+from app.agent.stats import (compute as compute_stats, describe_sleep_run,  # noqa: E402
+                             reached_milestones)
 from app.agent.tools import MAX_OPEN_NOTES, ONBOARDING_STEPS, dispatch  # noqa: E402
 from app.pricing import PRICES, cost_usd, usage_counts  # noqa: E402
 
@@ -70,7 +71,7 @@ _TOOL_LOG: list = []
 
 
 _RESULT_KEYS = ("saved", "refused", "rejected", "needs_confirmation", "error", "onboarding_step",
-                "milestone_today", "resolved", "note_id")
+                "milestone_today", "resolved", "note_id", "sleep_run")
 
 
 def _recording_dispatch(name, inp, user_id, raw_msg_id, db):
@@ -723,6 +724,23 @@ def _sam_no_crisis(ctx: Ctx) -> CheckResult:
     return bool(reply) and not hits, f"found {hits} in reply: {reply!r}"
 
 
+_COUNT_WORDS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6}
+_NIGHTS_UNDER = re.compile(r"\b(two|three|four|five|six|[2-6])\s+(?:\w+\s+){0,3}nights?\b"
+                           r"[^.]*?\bunder\s+(5|five|6|six)(?![\d.]\d|\d|[a-gi-z])", re.I)
+
+
+def _sam_sleep_counts(ctx: Ctx) -> CheckResult:
+    """Sam sleeps 5, 5.5, 5, 4.5: never more than 4 nights under 6h, or 1 under 5h."""
+    limit = {"5": 1, "five": 1, "6": 4, "six": 4}
+    bad = []
+    for s in ctx.sent:
+        for count, under in _NIGHTS_UNDER.findall(s.reply):
+            n = _COUNT_WORDS.get(count.lower()) or int(count)
+            if n > limit[under.lower()]:
+                bad.append((s.message, f"{count} nights under {under}"))
+    return not bad, f"overstated: {bad}"
+
+
 def _add_note(ctx: Ctx) -> None:
     """A note written straight through the tool, so deletion has one to wipe."""
     result = dispatch("remember", {"text": "Rows at the club on Saturday mornings"},
@@ -948,6 +966,7 @@ PERSONAS = [
             ("motivation mentions kids", _sam_motivation),
             ("quitting reply brings back his kids", _sam_reason_back),
             ("quitting reply isn't treated as a crisis or sent to a doctor", _sam_no_crisis),
+            ("sleep counts match the nights logged", _sam_sleep_counts),
         ],
     ),
 ]
@@ -1033,6 +1052,22 @@ def _code_user_state(db) -> CheckResult:
     return ok, f"1-day-old, energy 4: {new_state}; 3-day-old, energy 1-2, short sleep: {low_state}"
 
 
+def _code_sleep_run(db) -> CheckResult:
+    """Short-sleep run counts consecutive nights from the latest, one value per day,
+    with under 5h counted separately; a missing day ends the run."""
+    uid = _onboarded_user(db)
+    today = date.today()
+    for days_ago, sleep in ((5, 7.0), (3, 5.0), (2, 5.5), (1, 5.0), (0, 4.5)):
+        db.add(Checkin(user_id=uid, date=today - timedelta(days=days_ago), entry_type="morning",
+                       sleep_hours=sleep, raw_message="sleep"))
+    db.commit()
+    run = compute_stats(uid, db, today)["sleep_run"]
+    text = describe_sleep_run(run)
+    ok = (run["nights_under_6h"] == 4 and run["nights_under_5h"] == 1
+          and run["hours_oldest_first"] == [5.0, 5.5, 5.0, 4.5] and "4 nights" in text)
+    return ok, f"run={run}, text={text!r}"
+
+
 def _code_profile_locked(db) -> CheckResult:
     """After onboarding, saved profile values change only when the user's own
     message says so; a model-supplied confirmation flag counts for nothing."""
@@ -1070,6 +1105,7 @@ CODE_CHECKS = [
     ("1kg milestone uses goal direction and 3 weigh-in average", _code_kg_milestone),
     ("new user isn't struggling; low energy and short sleep is from day one", _code_user_state),
     ("profile locked after onboarding unless the message says to change it", _code_profile_locked),
+    ("short-sleep run counts consecutive nights, under 6h and under 5h", _code_sleep_run),
 ]
 
 
