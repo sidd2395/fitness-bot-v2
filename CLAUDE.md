@@ -38,7 +38,6 @@ in phase 2 and isn't in requirements.txt yet.
 
 ## Rules
 
-- Don't run the persona tests unless asked. They make real, paid API calls.
 - Never commit `.env` or any database file.
 - `coach.md` is the only source for the coach's voice. Don't put tone or
   persona text in code.
@@ -51,7 +50,8 @@ in phase 2 and isn't in requirements.txt yet.
 
 ## Working rules
 
-- After a change, run only the personas it touches (`--only`). Read the
+- After a change, run only the personas it touches (`--only`), without
+  asking. They make real, paid API calls, so never more than that. Read the
   transcript yourself.
 - On a failure, decide first: bot bug or test bug. Max 2 fix attempts, then
   stop and report.
