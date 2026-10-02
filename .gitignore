@@ -12,3 +12,5 @@ test.db
 *.db
 test_output*.txt
 .claude/settings.local.json
+# Real conversations exported by scripts/export_transcript.py
+transcript_*.txt
