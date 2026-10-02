@@ -129,7 +129,12 @@ TOOL_SCHEMAS = [
                 },
                 "trainer_name": {
                     "type": "string",
-                    "description": "Their trainer's name. Pass an empty string only if they said they have none.",
+                    "description": (
+                        "Who coaches them or keeps them accountable: a trainer, coach, or anyone "
+                        "who tracks their training or food. Their name, or a short description "
+                        "if there's no name (e.g. 'accountability coach who tracks food and "
+                        "weight'). Pass an empty string only if they said they have no one."
+                    ),
                 },
                 "motivation": {
                     "type": "string",
@@ -518,7 +523,7 @@ ONBOARDING_LABELS = {
     4: "main goal",
     5: "why they're starting now",
     6: "injuries or health issues",
-    7: "trainer name",
+    7: "trainer",
 }
 # onboarding_step == ONBOARDING_STEPS means onboarding is complete
 ONBOARDING_STEPS = len(ONBOARDING_LABELS)
@@ -726,7 +731,12 @@ def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict
     # like "perform". Code maps it; while the goal question is open, the message
     # itself is read as the answer.
     goal_in = inp.get("goal")
-    if not goal_in and user.onboarding_step == 4 and "?" not in raw_body:
+    if user.onboarding_step == 4 and names_several_goals(raw_body):
+        # "All of the above", "both", or two goals named: the model must not pick
+        # one for them. Ask which matters most.
+        refused["goal"] = _SEVERAL_GOALS
+        goal_in = None
+    elif not goal_in and user.onboarding_step == 4 and "?" not in raw_body:
         goal_in = raw_body if parse_goal(raw_body) else None
     if goal_in:
         goal = parse_goal(goal_in)
@@ -764,16 +774,32 @@ def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict
         _profile(user, db).disciplines = ",".join(inp["disciplines"])
         saved["disciplines"] = inp["disciplines"]
 
+    # While the trainer question is open, "nobody" needs a message that says so.
+    # If the model passed "" for a message that describes someone, the message
+    # itself is the answer, the same fallback as motivation.
+    if (user.onboarding_step == 7 and inp.get("trainer_name") == "" and raw_body.strip()
+            and "?" not in raw_body and not _NO_TRAINER_RE.fullmatch(raw_body.strip())):
+        inp = {**inp, "trainer_name": " ".join(raw_body.split())[:NOTE_MAX_CHARS]}
+    if inp.get("trainer_name"):
+        inp = {**inp, "trainer_name": " ".join(str(inp["trainer_name"]).split())[:NOTE_MAX_CHARS]}
     if "trainer_name" in inp and locked("trainer_name", user.trainer_name, inp["trainer_name"] or None):
         pass
     elif "trainer_name" in inp:
         user.trainer_name = inp["trainer_name"] or None
         saved["trainer_name"] = inp["trainer_name"]
 
+    # One row per issue. During onboarding an issue is only taken while the
+    # injuries question is open (later saves tend to repeat earlier answers),
+    # and an issue already active is never saved again, however it's worded.
     if "issue" in inp and inp["issue"]:
-        issue = Issue(user_id=user_id, what=inp["issue"])
-        db.add(issue)
-        saved["issue"] = inp["issue"]
+        duplicate = same_active_issue(inp["issue"], user.issues)
+        if not onboarded and user.onboarding_step != 6:
+            pass
+        elif duplicate is not None:
+            saved["issue_already_on_file"] = duplicate.what
+        else:
+            db.add(Issue(user_id=user_id, what=inp["issue"]))
+            saved["issue"] = inp["issue"]
 
     # Any answer to "what made you start now" counts. If the model left it out
     # while that question is open, the message itself is the answer, unless it
@@ -826,6 +852,65 @@ def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict
         "next_question": ONBOARDING_LABELS.get(step),
         "onboarding_complete": step >= ONBOARDING_STEPS,
     }
+
+
+_NO_TRAINER_RE = re.compile(
+    r"(no|nope|nah|none|nobody|no one|not really|n/?a|never|just me|myself|"
+    r"(i )?(don'?t|do not) have (one|any|a (personal )?(trainer|coach|pt))|"
+    r"no (personal )?(trainer|coach|pt)|not at the moment|not right now|not yet)"
+    r"([\s,]+(tbh|really|honestly|lol|haha|yet|atm|at the moment|right now|sadly))*[\s.!]*",
+    re.I,
+)
+
+_SEVERAL_GOALS = (
+    "They picked more than one goal. Not saved. Ask which one matters most to them "
+    "right now, in one question. Don't say how the goals relate or that one covers "
+    "the others."
+)
+_ALL_GOALS_RE = re.compile(
+    r"\b(all of (the|them|those|it)|all the above|all (four|three|those)|both of (them|those)|"
+    r"everything|a mix|mix of|combination of)\b|^\s*(all|both)\b",
+    re.I,
+)
+
+
+def names_several_goals(text: str) -> bool:
+    """'All of the above', 'both', or two or more goals named in one answer."""
+    t = str(text or "")
+    if _ALL_GOALS_RE.search(t):
+        return True
+    return sum(bool(re.search(rf"\b({words})\b", t, re.I)) for words in _GOAL_WORDS.values()) >= 2
+
+
+_ISSUE_STOP = {"the", "and", "but", "from", "with", "that", "this", "now", "few", "some", "it's", "its",
+               "was", "had", "has", "have", "been", "not", "back", "ago", "months", "years", "last",
+               "year", "month", "week", "weeks", "certain", "can", "mostly", "bit", "little", "my"}
+
+
+def _issue_words(text: str) -> set:
+    words = set(re.findall(r"[a-z]{3,}", text.lower())) - _ISSUE_STOP
+    # "back" is a stop word as in "a few months back", so keep it when it's the body part
+    if re.search(r"\b(lower|upper|mid|my|left|right)\s+back\b|\bback\s+(pain|strain|injury|surgery)", text, re.I):
+        words.add("back")
+    return words
+
+
+def same_active_issue(text: str, issues) -> Optional["Issue"]:
+    """An active issue this text describes again: most of the shorter text's words
+    appear in the other. Different wordings of one injury match; a different
+    injury to the same body part usually doesn't."""
+    new = _issue_words(text)
+    for issue in issues:
+        if issue.status != "active":
+            continue
+        old = _issue_words(issue.what)
+        if not new or not old:
+            if text.strip().lower() == issue.what.strip().lower():
+                return issue
+            continue
+        if len(new & old) / min(len(new), len(old)) >= 0.75:
+            return issue
+    return None
 
 
 _NO_REASON_RE = re.compile(

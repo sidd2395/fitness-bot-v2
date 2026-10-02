@@ -8,3 +8,9 @@
   "What's making the nights so short right now?") although coach.md says no
   questions when struggling, and the coach guesses causes ("Kids make that
   hard"). Style; revisit if real users find it pushy.
+- A message being processed when the server stops never gets a reply (it stays
+  status=received). Revisit before real users: Railway restarts on every deploy.
+- The one-line trainer acknowledgement at the end of onboarding often runs to
+  two sentences (lena: "Your nutritionist will keep an eye on the food and
+  weight side. I'll help you stay consistent..."). Code keeps it to one line
+  with no question. Style; revisit if it reads long on a phone.

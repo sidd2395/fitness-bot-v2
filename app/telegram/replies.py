@@ -1,8 +1,8 @@
 """Fixed Telegram replies, sent from code with no model call."""
 
 CONSENT_NOTICE = (
-    "Hi, I'm Coach Bob, an AI fitness coach. I'll check in with you each day and "
-    "help you stay on track.\n\n"
+    "Hi, I'm Coach Bob, an AI fitness coach. Send me a quick check-in each day and "
+    "I'll help you stay on track.\n\n"
     "Before we start, how your data is used:\n"
     "• I store your profile, check-ins and notes so I can coach you.\n"
     "• Your messages are processed by Anthropic's AI.\n"

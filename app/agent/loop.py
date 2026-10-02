@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import RawMessage, User
 from app.agent.tools import ONBOARDING_STEPS, TOOL_SCHEMAS, dispatch
-from app.agent.context import build_system_prompt
+from app.agent.context import build_system_prompt, build_trainer_ack_prompt
 from app.pricing import cost_usd, usage_counts
 
 load_dotenv()
@@ -29,8 +29,8 @@ HISTORY_WINDOW = timedelta(hours=24)
 
 # Fixed replies, sent from code with no model call
 WELCOME_REPLY = (
-    "Hi, I'm Coach Bob, an AI fitness coach. I'll check in with you each day and "
-    "help you stay on track. To start, what's your first name?"
+    "Hi, I'm Coach Bob, an AI fitness coach. Send me a quick check-in each day and "
+    "I'll help you stay on track. To start, what's your first name?"
 )
 BLOCKED_REPLY = (
     "Sorry, I can only coach people aged 18 and over. A parent, school coach or "
@@ -170,7 +170,8 @@ def _onboard(user: User, messages: list, raw_msg: RawMessage, db: Session) -> st
         return BLOCKED_REPLY
     if user.onboarding_step >= ONBOARDING_STEPS:
         _log("onboarding_complete", user.user_id)
-        return ONBOARDED_REPLY
+        ack = _trainer_ack(user, messages) if user.trainer_name else ""
+        return f"{ack}\n\n{ONBOARDED_REPLY}" if ack else ONBOARDED_REPLY
 
     # Rebuilt so the per-turn block names the question that is now next
     response = _call(
@@ -178,6 +179,23 @@ def _onboard(user: User, messages: list, raw_msg: RawMessage, db: Session) -> st
         tool_choice={"type": "none"}, tools=ONBOARDING_TOOLS,
     )
     return _extract_text(response)
+
+
+def _trainer_ack(user: User, messages: list) -> str:
+    """One sentence acknowledging who helps them, ahead of the fixed "all set"
+    line. Dropped if it asks a question or the call fails: the fixed line is enough."""
+    try:
+        response = _call(MODEL_ONBOARDING, user.user_id, build_trainer_ack_prompt(user), messages,
+                         tool_choice={"type": "none"}, tools=ONBOARDING_TOOLS, max_tokens=120)
+    except Exception:
+        _log("trainer_ack_failed", user.user_id)
+        return ""
+    lines = [line.strip() for line in _all_text(response).splitlines() if line.strip()]
+    ack = lines[0] if lines else ""
+    if "?" in ack:
+        _log("trainer_ack_dropped", user.user_id, "question")
+        return ""
+    return ack
 
 
 # --------------------------------------------------------------------------- #

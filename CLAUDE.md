@@ -76,7 +76,10 @@ A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
 ## Current state
 
 Phase 1 is built and passed its last full run, 187/187. Since then the
-short-sleep run is computed in code (sam 22/22).
+short-sleep run is computed in code (sam 22/22), and the onboarding fixes:
+an active issue is saved once, a described trainer or coach is saved and
+acknowledged, several goals at once save none, no promises to message first
+(new persona lena; onboarding personas and tom pass).
 
 Phase 2, part 1 is built and passes the code-level checks, but hasn't been
 tried on a phone yet: Telegram layer, polling, webhook, allowlist, consent,

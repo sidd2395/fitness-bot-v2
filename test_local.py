@@ -428,6 +428,17 @@ def one_question_at_most(ctx: Ctx) -> CheckResult:
     return not bad, f"(message, question marks): {bad}"
 
 
+_PROMISE_RE = re.compile(
+    r"\b(I'?ll|I will|I'?m going to|I can)\s+(\w+\s+){0,2}"
+    r"(check in|check back|message|text|ping|reach out|follow up|get back|be in touch|remind)\b", re.I)
+
+
+def no_promise_to_message_first(ctx: Ctx) -> CheckResult:
+    """The bot only replies, so no reply promises to message or check in later."""
+    bad = [(s.message, m.group(0)) for s in ctx.sent for m in _PROMISE_RE.finditer(s.reply)]
+    return not bad, f"promises: {bad}"
+
+
 COMMON_CHECKS = [
     ("first reply says it's an AI", first_reply_says_ai),
     ("no empty replies", no_empty_replies),
@@ -440,6 +451,7 @@ COMMON_CHECKS = [
     ("no check-in saved before onboarding completes", no_checkin_during_onboarding),
     ("no reply repeats the same 6-word run", no_repeated_runs),
     ("no reply has more than one question mark", one_question_at_most),
+    ("no reply promises to message first", no_promise_to_message_first),
 ]
 
 
@@ -593,6 +605,12 @@ def _tom_back_issue(ctx: Ctx) -> CheckResult:
     issues = [(i.what, i.status) for i in _user(ctx).issues]
     ok = any("back" in what.lower() and status == "active" for what, status in issues)
     return ok, f"issues: {issues}"
+
+
+def one_active_issue(ctx: Ctx) -> CheckResult:
+    """The injury answer is saved once, not again on later answers."""
+    issues = [i.what for i in _user(ctx).issues if i.status == "active"]
+    return len(issues) == 1, f"active issues: {issues}"
 
 
 def _tom_warned(ctx: Ctx) -> CheckResult:
@@ -782,6 +800,41 @@ def _delete(ctx: Ctx) -> None:
     print(f"\n[delete_user({ctx.user_id}) -> {ctx.marks['deleted']}]")
 
 
+_LENA_ALL = "all of the above honestly"
+_LENA_TRAINER = "not a trainer, but my nutritionist checks my food and weight every week"
+_LENA_TRIP = "off to Bali next week for 5 days, how do I handle that"
+
+
+def _lena_mark_goal(ctx: Ctx) -> None:
+    ctx.db.expire_all()
+    p = _user(ctx).profile
+    ctx.marks["goal_after_all"] = p.goal if p else None
+
+
+def _lena_no_goal_picked(ctx: Ctx) -> CheckResult:
+    reply = _reply(ctx, _LENA_ALL)
+    goal = ctx.marks.get("goal_after_all")
+    return goal is None and reply.count("?") == 1, f"goal saved={goal!r}, reply: {reply!r}"
+
+
+def _lena_goal(ctx: Ctx) -> CheckResult:
+    p = _user(ctx).profile
+    return bool(p and p.goal == "lose_fat"), f"goal={p.goal if p else None!r}"
+
+
+def _lena_trainer(ctx: Ctx) -> CheckResult:
+    t = _user(ctx).trainer_name
+    return bool(t and "nutritionist" in t.lower()), f"trainer_name={t!r}"
+
+
+def _lena_trainer_ack(ctx: Ctx) -> CheckResult:
+    """One line acknowledging the nutritionist, then the fixed all-set line."""
+    reply = _reply(ctx, _LENA_TRAINER)
+    ack = reply[:-len(ONBOARDED_REPLY)].strip() if reply.endswith(ONBOARDED_REPLY) else None
+    ok = bool(ack) and "\n" not in ack and "?" not in ack
+    return ok, f"reply: {reply!r}"
+
+
 PERSONAS = [
     Persona(
         name="priya",
@@ -890,6 +943,7 @@ PERSONAS = [
         checks=[
             ("onboarding complete", onboarding_complete),
             ("active issue mentioning back", _tom_back_issue),
+            ("back injury saved once", one_active_issue),
             ("check-in saved", _tom_checkin),
             ("deadlift reply keeps the full back warning", _tom_warned),
             ("back warning comes before any milestone", _tom_safety_first),
@@ -951,6 +1005,24 @@ PERSONAS = [
             ("Tokyo note saved with a follow-up date", _maya_tokyo_saved),
             ("follow-up reply mentions Tokyo or the trip", _maya_asked_about_trip),
             ("Tokyo note resolved afterwards", _maya_note_resolved),
+        ],
+    ),
+    Persona(
+        name="lena",
+        summary="Picks every goal, describes a nutritionist, mentions a trip",
+        steps=[
+            "hi", "Lena", "36", "female", "70", _LENA_ALL, _lena_mark_goal, "lose fat",
+            "want more energy for my kids", "sore right shoulder from swimming", _LENA_TRAINER,
+            "70.2 slept 7h swim today",
+            _LENA_TRIP,
+        ],
+        checks=[
+            ("onboarding complete", onboarding_complete),
+            ("'all of the above' saves no goal and asks one question", _lena_no_goal_picked),
+            ("goal lose_fat once she picks", _lena_goal),
+            ("nutritionist saved as who helps her", _lena_trainer),
+            ("all-set reply opens with one line about the nutritionist", _lena_trainer_ack),
+            ("shoulder saved once", one_active_issue),
         ],
     ),
     Persona(
@@ -1072,6 +1144,72 @@ def _code_sleep_run(db) -> CheckResult:
     ok = (run["nights_under_6h"] == 4 and run["nights_under_5h"] == 1
           and run["hours_oldest_first"] == [5.0, 5.5, 5.0, 4.5] and "4 nights" in text)
     return ok, f"run={run}, text={text!r}"
+
+
+def _user_at_step(db, step: int) -> int:
+    uid = _onboarded_user(db)
+    db.get(User, uid).onboarding_step = step
+    db.commit()
+    return uid
+
+
+def _save(db, uid: int, body: str, inp: dict) -> dict:
+    m = RawMessage(user_id=uid, body=body)
+    db.add(m)
+    db.commit()
+    return dispatch("save_profile", inp, uid, m.id, db)
+
+
+def _code_issue_once(db) -> CheckResult:
+    """An active issue isn't saved again however it's reworded; a new injury is.
+    During onboarding an issue is only taken at the injuries question."""
+    uid = _onboarded_user(db)
+    _save(db, uid, "strained my lower left back on RDLs a few months back",
+          {"issue": "Lower left back strain from improper RDL a few months back, mostly better now"})
+    again = _save(db, uid, "my back is fine mostly",
+                  {"issue": "lower left back strain from improper RDL, better now"})
+    _save(db, uid, "also my right shoulder clicks", {"issue": "right shoulder clicking"})
+    active = [i.what for i in db.get(User, uid).issues if i.status == "active"]
+
+    early = _user_at_step(db, 7)
+    _save(db, early, "no trainer", {"trainer_name": "", "issue": "lower back strain"})
+    early_issues = [i.what for i in db.get(User, early).issues]
+    ok = (len(active) == 2 and "issue_already_on_file" in again["saved"] and not early_issues)
+    return ok, f"active={active}, repeat result={again['saved']}, saved at trainer step={early_issues}"
+
+
+def _code_trainer_described(db) -> CheckResult:
+    """A described accountability person is saved even if the model passed "";
+    a plain no saves nobody. Both finish onboarding."""
+    described = _user_at_step(db, 7)
+    msg = "Not to help me workout but someone who tracks my weight and food to keep me accountable"
+    _save(db, described, msg, {"trainer_name": ""})
+    nobody = _user_at_step(db, 7)
+    _save(db, nobody, "nah", {"trainer_name": ""})
+    a, b = db.get(User, described), db.get(User, nobody)
+    ok = (a.trainer_name == msg and a.onboarding_step == ONBOARDING_STEPS
+          and b.trainer_name is None and b.onboarding_step == ONBOARDING_STEPS)
+    return ok, f"described={a.trainer_name!r} step {a.onboarding_step}; nah={b.trainer_name!r} step {b.onboarding_step}"
+
+
+def _code_several_goals(db) -> CheckResult:
+    """'All the above' or two goals named: nothing saved even if the model picked one."""
+    wrong = []
+    for msg in ("All the above actually", "build muscle and lose fat", "both"):
+        uid = _user_at_step(db, 4)
+        db.get(User, uid).profile.goal = None
+        db.commit()
+        result = _save(db, uid, msg, {"goal": "lose_fat"})
+        u = db.get(User, uid)
+        if u.profile.goal is not None or u.onboarding_step != 4 or "goal" not in result["refused"]:
+            wrong.append(msg)
+    uid = _user_at_step(db, 4)
+    db.get(User, uid).profile.goal = None
+    db.commit()
+    _save(db, uid, "lose fat i guess", {"goal": "lose_fat"})
+    if db.get(User, uid).profile.goal != "lose_fat":
+        wrong.append("single goal refused")
+    return not wrong, f"wrong: {wrong}"
 
 
 def _code_profile_locked(db) -> CheckResult:
@@ -1358,6 +1496,9 @@ CODE_CHECKS = [
     ("new user isn't struggling; low energy and short sleep is from day one", _code_user_state),
     ("profile locked after onboarding unless the message says to change it", _code_profile_locked),
     ("short-sleep run counts consecutive nights, under 6h and under 5h", _code_sleep_run),
+    ("an active issue is saved once, however it's worded", _code_issue_once),
+    ("a described trainer or coach is saved; a plain no isn't", _code_trainer_described),
+    ("several goals at once save none", _code_several_goals),
     ("telegram: allowlist turns strangers away and stores nothing", _code_tg_allowlist),
     ("telegram: wrong webhook secret gets 401", _code_tg_webhook_secret),
     ("telegram: duplicate update_id handled once", _code_tg_duplicate),

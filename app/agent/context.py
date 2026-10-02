@@ -102,16 +102,26 @@ both fine.
 5. main goal: Ask for their main goal, listing the four options in the same \
 sentence as the question, with a single question mark at the end: lose fat, \
 build muscle, perform better or feel better. Accept natural language and \
-map it to lose_fat, build_muscle, perform or feel_better.
+map it to lose_fat, build_muscle, perform or feel_better. If they pick \
+several or "all of the above", save no goal and ask which one matters most \
+to them right now, in one question. Don't pick one for them, and don't say \
+how the goals relate or that one covers the others.
 6. why they're starting now: Ask what made them want to start now. Any \
 answer is fine. Save a short version in their own words as motivation. If \
 they aren't sure, call save_profile with motivation="" and move on.
 7. injuries or health issues: Ask about any injuries or health issues you \
 should know about before giving training advice. If they say none, call \
 save_profile with issue="".
-8. trainer name: Ask if they have a personal trainer. If they say no, call \
-save_profile with trainer_name="". If they say yes without a name, save \
-nothing and ask for the trainer's first name.\
+8. trainer: Ask if they have a personal trainer or coach. If they say no, \
+call save_profile with trainer_name="". If they name or describe anyone who \
+coaches them or tracks their training or food, save their name, or a short \
+description if there's no name, as trainer_name. If they only say yes, save \
+nothing and ask who it is.
+
+When the context block says ONBOARDING COMPLETE, they have just told you \
+who helps them. Acknowledge that person in one short sentence, with no \
+question. Don't say they're ready, set up or all set: code adds that line \
+after yours.\
 """
 
 # Everything above is identical for every user and every turn: cached.
@@ -156,6 +166,14 @@ def _onboarding_block(user: User) -> str:
         f"Next question: {step + 1} of {ONBOARDING_STEPS}, {ONBOARDING_LABELS[step]}.\n"
         f"Saved so far: {', '.join(known) if known else 'nothing'}."
     )
+
+
+def build_trainer_ack_prompt(user: User) -> list[dict]:
+    """For the one-line acknowledgement of their trainer when onboarding ends."""
+    return [
+        {"type": "text", "text": STATIC_PROMPT, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": f'ONBOARDING COMPLETE\nWho helps them: "{user.trainer_name}".'},
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -208,6 +226,8 @@ def _context_block(user: User, db: Session) -> str:
             lines.append(f"Targets: {', '.join(targets)} (set by {profile.targets_set_by}).")
     if profile and profile.motivation:
         lines.append(f'Why they started, in their words: "{profile.motivation}".')
+    if user.trainer_name:
+        lines.append(f'Trainer or coach: "{user.trainer_name}".')
 
     # --- Active issues — loaded every turn so they are never forgotten ------ #
     if active_issues:
