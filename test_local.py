@@ -20,14 +20,17 @@ Usage:
 """
 
 import argparse
+import itertools
 import logging
 import os
 import re
 import sys
 import textwrap
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Callable, Union
 
 ROOT = Path(__file__).resolve().parent
@@ -54,7 +57,8 @@ OUTPUT_FILE = ROOT / f"test_output_{_slug}.txt"
 from sqlalchemy import func, select  # noqa: E402
 
 from app.db.session import SessionLocal, engine  # noqa: E402
-from app.db.models import Base, Checkin, Milestone, Note, Profile, RawMessage, User  # noqa: E402
+from app.db.models import (Base, Checkin, Issue, Milestone, Note, Profile, RawMessage,  # noqa: E402
+                           TelegramUpdate, User)
 from app.db import delete_user  # noqa: E402
 from app.agent import loop as agent_loop  # noqa: E402
 from app.agent.context import asks_for_checkin, checkin_asks, checkin_request_line  # noqa: E402
@@ -65,6 +69,8 @@ from app.agent.stats import (compute as compute_stats, describe_sleep_run,  # no
                              reached_milestones)
 from app.agent.tools import MAX_OPEN_NOTES, ONBOARDING_STEPS, dispatch  # noqa: E402
 from app.pricing import PRICES, cost_usd, usage_counts  # noqa: E402
+from app.telegram import handler as tg  # noqa: E402
+from app.telegram import replies as tg_replies  # noqa: E402
 
 # Every tool call in the current message, so checks can see what was refused
 _TOOL_LOG: list = []
@@ -1099,6 +1105,221 @@ def _code_profile_locked(db) -> CheckResult:
     return not wrong, f"wrong: {wrong}"
 
 
+# --------------------------------------------------------------------------- #
+# Telegram layer: a fake Bot API, and run() replaced so no model is called      #
+# --------------------------------------------------------------------------- #
+
+class FakeTelegram:
+    def __init__(self):
+        self.sent: list = []   # (chat_id, text, buttons)
+
+    def send_message(self, chat_id, text, buttons=None):
+        self.sent.append((chat_id, text, buttons))
+
+    def texts(self, chat_id) -> list:
+        return [t for c, t, _ in self.sent if c == chat_id]
+
+    def send_typing(self, chat_id):
+        pass
+
+    def answer_callback(self, callback_id):
+        pass
+
+    def clear_buttons(self, chat_id, message_id):
+        pass
+
+
+_UPDATE_IDS = itertools.count(int(datetime.utcnow().timestamp()))
+
+
+def _tg_text(chat_id: str, text=None, **fields) -> dict:
+    msg = {"message_id": 1, "chat": {"id": int(chat_id), "type": "private"}, **fields}
+    if text is not None:
+        msg["text"] = text
+    return {"update_id": next(_UPDATE_IDS), "message": msg}
+
+
+def _tg_tap(chat_id: str, data: str) -> dict:
+    return {"update_id": next(_UPDATE_IDS), "callback_query": {
+        "id": "cb", "data": data,
+        "message": {"message_id": 2, "chat": {"id": int(chat_id), "type": "private"}}}}
+
+
+@contextmanager
+def _telegram(*allowed: str):
+    """Allowlist set, run() swapped for a stub that stores a turn like the real
+    one does, and a rate-limit clock that only moves when told."""
+    saved_env, saved_run, saved_clock = os.environ.get("ALLOWED_TELEGRAM_IDS"), tg.run, tg.limiter.clock
+    os.environ["ALLOWED_TELEGRAM_IDS"] = ",".join(allowed)
+    calls = []
+    now = [0.0]
+
+    def fake_run(user_id, message, db):
+        db.add(RawMessage(user_id=user_id, body=message, status="processed", reply_text="ok"))
+        db.commit()
+        calls.append(message)
+        return "ok"
+
+    def send(update, db):
+        now[0] += tg.MESSAGE_INTERVAL_S + 1
+        tg.handle_update(update, api, db)
+
+    tg.run = fake_run
+    tg.limiter.clock = lambda: now[0]
+    tg.limiter.reset()
+    api = FakeTelegram()
+    try:
+        yield SimpleNamespace(api=api, calls=calls, send=send, now=now)
+    finally:
+        tg.run, tg.limiter.clock = saved_run, saved_clock
+        if saved_env is None:
+            os.environ.pop("ALLOWED_TELEGRAM_IDS", None)
+        else:
+            os.environ["ALLOWED_TELEGRAM_IDS"] = saved_env
+
+
+def _tg_user(db, chat_id: str):
+    return db.query(User).filter(User.telegram_chat_id == chat_id).first()
+
+
+def _table_counts(db) -> dict:
+    return {t.name: db.execute(select(func.count()).select_from(t)).scalar()
+            for t in Base.metadata.sorted_tables}
+
+
+def _code_tg_allowlist(db) -> CheckResult:
+    """A stranger gets the beta line, for text and button taps alike, and no row is written."""
+    stranger = "5550001"
+    before = _table_counts(db)
+    with _telegram("5550999") as t:
+        t.send(_tg_text(stranger, "hi"), db)
+        t.send(_tg_text(stranger, "/start"), db)
+        t.send(_tg_tap(stranger, "consent"), db)
+        t.send(_tg_text(stranger, None, photo=[{"file_id": "x"}]), db)
+        texts = t.api.texts(stranger)
+    after = _table_counts(db)
+    ok = before == after and texts == [tg_replies.NOT_ALLOWED] * 3 and not t.calls
+    return ok, f"replies={texts}, tables changed: {before != after}, agent calls={t.calls}"
+
+
+def _code_tg_webhook_secret(db) -> CheckResult:
+    """Wrong or missing secret header gets 401 and nothing is queued; the right one gets 200."""
+    from fastapi.testclient import TestClient
+    from app import main
+
+    saved_secret = os.environ.get("TELEGRAM_WEBHOOK_SECRET")
+    os.environ["TELEGRAM_WEBHOOK_SECRET"] = "right-secret"
+    queued = []
+    saved_handle, saved_api = main.handle_update, main.telegram_api
+    main.handle_update = lambda update, api: queued.append(update)
+    main.telegram_api = lambda: None
+    try:
+        client = TestClient(main.app)  # not as a context manager, so no startup migrations
+        update = _tg_text("5550002", "hi")
+        wrong = client.post("/telegram/webhook", json=update,
+                            headers={"X-Telegram-Bot-Api-Secret-Token": "wrong"}).status_code
+        missing = client.post("/telegram/webhook", json=update).status_code
+        right = client.post("/telegram/webhook", json=update,
+                            headers={"X-Telegram-Bot-Api-Secret-Token": "right-secret"}).status_code
+        health = client.get("/health").text
+    finally:
+        main.handle_update, main.telegram_api = saved_handle, saved_api
+        if saved_secret is None:
+            os.environ.pop("TELEGRAM_WEBHOOK_SECRET", None)
+        else:
+            os.environ["TELEGRAM_WEBHOOK_SECRET"] = saved_secret
+    ok = (wrong, missing, right, health, len(queued)) == (401, 401, 200, "ok", 1)
+    return ok, f"wrong={wrong}, missing={missing}, right={right}, health={health!r}, queued={len(queued)}"
+
+
+def _code_tg_duplicate(db) -> CheckResult:
+    """The same update_id delivered twice is handled once."""
+    chat = "5550003"
+    with _telegram(chat) as t:
+        update = _tg_text(chat, "/help")
+        t.send(update, db)
+        t.send(update, db)
+        texts = t.api.texts(chat)
+    return texts == [tg_replies.HELP], f"replies={len(texts)}"
+
+
+def _code_tg_consent_first(db) -> CheckResult:
+    """Before the tap: the notice and button every time, no user row, no message stored,
+    no agent call. After it: consent_at saved, name asked, and messages reach the agent."""
+    chat = "5550004"
+    with _telegram(chat) as t:
+        for text in ("hi", "Sam", "34"):
+            t.send(_tg_text(chat, text), db)
+        before_tap = (_tg_user(db, chat), list(t.calls), t.api.texts(chat), t.api.sent[-1][2])
+        t.send(_tg_tap(chat, "consent"), db)
+        user = _tg_user(db, chat)
+        t.send(_tg_text(chat, "Sam"), db)
+        after = t.api.texts(chat)[3:]
+    no_user, calls, notices, buttons = before_tap
+    ok = (no_user is None and not calls and notices == [tg_replies.CONSENT_NOTICE] * 3
+          and buttons == [tg_replies.AGREE_BUTTON] and user is not None
+          and user.consent_given_at is not None and after == [tg_replies.AFTER_CONSENT, "ok"]
+          and t.calls == ["Sam"])
+    return ok, (f"user before tap={no_user}, agent calls before={calls}, consent_given_at="
+                f"{user.consent_given_at if user else None}, after tap={after}")
+
+
+def _code_tg_delete(db) -> CheckResult:
+    """/delete asks first; the button wipes every row the user owns."""
+    chat = "5550005"
+    with _telegram(chat) as t:
+        t.send(_tg_tap(chat, "consent"), db)
+        uid = _tg_user(db, chat).user_id
+        db.add(Profile(user_id=uid, goal="lose_fat", start_weight=70, motivation="feel strong"))
+        db.add(Checkin(user_id=uid, date=date.today(), entry_type="morning", weight_kg=70,
+                       raw_message="70"))
+        db.add(Note(user_id=uid, text="Trains at lunch"))
+        db.add(Milestone(user_id=uid, kind="first_checkin", reached_on=date.today()))
+        db.add(Issue(user_id=uid, what="sore knee"))
+        db.commit()
+        t.send(_tg_text(chat, "hello"), db)
+        t.send(_tg_text(chat, "/delete"), db)
+        asked = t.api.sent[-1]
+        still_there = _tg_user(db, chat) is not None
+        t.send(_tg_tap(chat, "delete_yes"), db)
+        db.expire_all()
+    left = {}
+    for table in Base.metadata.sorted_tables:
+        if "user_id" in table.c:
+            n = db.execute(select(func.count()).select_from(table)
+                           .where(table.c.user_id == uid)).scalar()
+            if n:
+                left[table.name] = n
+    gone = db.get(User, uid) is None
+    ok = (asked[1] == tg_replies.DELETE_CONFIRM and asked[2] == tg_replies.DELETE_BUTTONS
+          and still_there and gone and not left and t.api.texts(chat)[-1] == tg_replies.DELETED)
+    return ok, f"confirm asked={asked[1] == tg_replies.DELETE_CONFIRM}, user gone={gone}, rows left={left}"
+
+
+def _code_tg_daily_cap(db) -> CheckResult:
+    """40 messages a day reach the agent; the 41st gets the cap reply and isn't stored.
+    Also: a second message inside 2 seconds is turned away, and a photo gets the text-only line."""
+    chat = "5550006"
+    with _telegram(chat) as t:
+        t.send(_tg_tap(chat, "consent"), db)
+        uid = _tg_user(db, chat).user_id
+        for i in range(tg.DAILY_TURN_CAP + 1):
+            t.send(_tg_text(chat, f"message {i + 1}"), db)
+        replies_ = t.api.texts(chat)[1:]
+        stored = db.query(RawMessage).filter(RawMessage.user_id == uid).count()
+        t.now[0] += 0.5  # inside the interval
+        tg.handle_update(_tg_text(chat, "too fast"), t.api, db)
+        fast = t.api.texts(chat)[-1]
+        t.send(_tg_text(chat, None, photo=[{"file_id": "x"}]), db)
+        photo = t.api.texts(chat)[-1]
+    ok = (replies_[:tg.DAILY_TURN_CAP] == ["ok"] * tg.DAILY_TURN_CAP
+          and replies_[tg.DAILY_TURN_CAP] == tg_replies.DAILY_CAP
+          and len(t.calls) == tg.DAILY_TURN_CAP and stored == tg.DAILY_TURN_CAP
+          and fast == tg_replies.SLOW_DOWN and photo == tg_replies.TEXT_ONLY)
+    return ok, (f"agent calls={len(t.calls)}, 41st reply={replies_[-1]!r}, stored={stored}, "
+                f"fast={fast!r}, photo={photo!r}")
+
+
 CODE_CHECKS = [
     ("31st open note is refused", _code_notes_cap),
     ("notes refuse injuries, past follow-ups, other users' ids", _code_note_rules),
@@ -1106,6 +1327,12 @@ CODE_CHECKS = [
     ("new user isn't struggling; low energy and short sleep is from day one", _code_user_state),
     ("profile locked after onboarding unless the message says to change it", _code_profile_locked),
     ("short-sleep run counts consecutive nights, under 6h and under 5h", _code_sleep_run),
+    ("telegram: allowlist turns strangers away and stores nothing", _code_tg_allowlist),
+    ("telegram: wrong webhook secret gets 401", _code_tg_webhook_secret),
+    ("telegram: duplicate update_id handled once", _code_tg_duplicate),
+    ("telegram: no onboarding before consent", _code_tg_consent_first),
+    ("telegram: /delete confirms, then wipes everything", _code_tg_delete),
+    ("telegram: daily cap at 41, rate limit, text only", _code_tg_daily_cap),
 ]
 
 
