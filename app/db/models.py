@@ -1,6 +1,6 @@
 from datetime import datetime
 from sqlalchemy import (
-    Column, Integer, String, Float, Boolean,
+    BigInteger, Column, Integer, String, Float, Boolean,
     DateTime, Date, Text, ForeignKey, UniqueConstraint,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -135,3 +135,12 @@ class RawMessage(Base):
 
     user    = relationship("User",    back_populates="raw_messages", foreign_keys=[user_id])
     checkin = relationship("Checkin", foreign_keys=[checkin_id])
+
+
+class TelegramUpdate(Base):
+    """A Telegram update already handled. Telegram retries a webhook delivery it
+    thinks failed; a second insert of the same id means skip it. No user link."""
+    __tablename__ = "telegram_updates"
+
+    update_id   = Column(BigInteger, primary_key=True, autoincrement=False)
+    received_at = Column(DateTime, default=datetime.utcnow, nullable=False)
