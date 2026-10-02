@@ -49,17 +49,39 @@ in phase 2 and isn't in requirements.txt yet.
   values change only when the user's own message backs it up (`_EVIDENCE` in
   tools.py); `is_correction` needs correction words or a yes to our question.
 
+## Working rules
+
+- After a change, run only the personas it touches (`--only`). Read the
+  transcript yourself.
+- On a failure, decide first: bot bug or test bug. Max 2 fix attempts, then
+  stop and report.
+- Report in 20 lines max: what changed, pass rate, new failures with the exact
+  reply quoted and your verdict, run cost.
+- Hard-rule checks must pass. No word-matching checks for style; log style
+  issues in `KNOWN_QUIRKS.md`.
+- Full suite only before a deploy or when asked. No new features during a fix
+  batch; ideas go in `IDEAS.md`.
+
 ## Current state
 
 Phase 1, the local agent, is built, plus the personal-coaching batch
-(motivation, notes, milestones, length matching) and cost tracking. Last full
-run: 172/173. Fixed since, not yet checked by a run:
+(motivation, notes, milestones, length matching) and cost tracking, with
+Sonnet 5 and Haiku 4.5 prices filled in. Last full run: 172/173. Fixed since,
+not yet checked by a persona run (the last run, `--only code`, passed 5/5):
 - Only the final text of a turn is sent; text written alongside a tool call
   is a draft, used only if the final text is empty
 - log_checkin returns weight_change (since the last weigh-in, computed in
   code); the coach may only state changes it's given
-- The check-in rule sits on its context line ("Already asked today: ..."),
-  and the test transcript prints that line on every coaching turn
+- Check-in invitations: before the first ever check-in, one gentle invitation
+  per reply; after it, once a day ("Already asked today: ..."). The test
+  transcript prints that line on every coaching turn
+- With an active issue, a milestone goes at the end of the reply, after any
+  safety point
+- coach.md: no training plans, programmes or schedules, never offered
+- Profile values are locked after onboarding unless the user's message backs
+  the change (`_EVIDENCE`); `user_confirmed` is gone from `save_profile`, and
+  number words match whole words ("sixteen" is 16)
+- `--only` takes several personas
 
 ## Next: phase 2
 
