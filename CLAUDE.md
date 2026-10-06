@@ -50,7 +50,12 @@ A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
 - `python3 -m alembic upgrade head`: migrate `fitness.db`
 - `python3 run_polling.py`: the bot on Telegram over long polling, local db.
   Removes any webhook; `python3 scripts/set_webhook.py <https url>` puts it back.
-- Railway: `railway.json` runs `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+- Railway: see DEPLOY.md (variables, webhook, admin scripts, the gate before
+  every push). Production runs Python 3.12 (`.python-version`); test with 3.12
+  too, since Railpack doesn't support 3.9.
+- `python3 scripts/user_data.py --chat <id> --count | --delete`: row counts per
+  table, or delete one user. Never prints content.
+- `python3 scripts/export_transcript.py [--user N | --chat ID] [--anonymise]`
 
 ## Rules
 
