@@ -37,8 +37,11 @@ BLOCKED_REPLY = (
     "doctor is a good person to talk to about training."
 )
 ONBOARDED_REPLY = (
-    "You're all set. Send your first check-in whenever you're ready, something like: "
-    "82kg, slept 7h, legs today."
+    "You're all set. Send your first check-in whenever you're ready, numbers or words, "
+    "for example:\n"
+    "• 82kg, slept 7h, legs today\n"
+    "• slept badly, skipped gym, ate light\n"
+    "Type /help anytime."
 )
 # When no reply text can be produced at all: one wording if this turn saved
 # something, another if it saved nothing

@@ -25,15 +25,18 @@ ERROR_REPLY = "Sorry, something went wrong on my side. Try sending that again in
 UNKNOWN_COMMAND = "I don't know that command. /help lists what I can do."
 
 HELP = (
-    "I'm Coach Bob, an AI fitness coach. Send me a daily check-in, something like "
-    "\"82kg, slept 7h, legs today\", and I'll keep track and coach you from it. You can "
-    "also just tell me how training's going or ask a question.\n\n"
-    "Commands:\n"
-    "/help: this message\n"
-    "/summary: your check-ins as a table to send your trainer (last 14 days, or e.g. "
-    "/summary 30 for 30 days)\n"
-    "/mydata: everything I hold about you\n"
-    "/delete: erase everything I hold about you"
+    "Coach Bob is an AI fitness coach you check in with by text.\n"
+    "Tell him how your day's going and he keeps track of it for you.\n"
+    "He spots patterns and gives you one useful thing to focus on.\n\n"
+    "Check-ins can look like:\n"
+    "• 82kg, slept 7h, legs today\n"
+    "• slept badly, skipped gym, ate light\n"
+    "• is it ok to train with a sore knee?\n\n"
+    "Nothing is required. Rough is fine.\n\n"
+    "/summary: your recent check-ins to send a trainer (/summary 30 for 30 days)\n"
+    "/mydata: everything Coach Bob holds about you\n"
+    "/delete: erase all of it\n\n"
+    "He won't write meal plans or training programmes, and he can't give medical advice."
 )
 
 DELETE_CONFIRM = (
