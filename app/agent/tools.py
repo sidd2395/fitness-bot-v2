@@ -117,10 +117,16 @@ TOOL_SCHEMAS = [
                 "disciplines": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "e.g. ['gym', 'running']",
+                    "description": ("Sports or kinds of training they do, e.g. ['gym', 'Muay Thai']. "
+                                    "Added to what's saved, so pass only new ones."),
                 },
-                "calorie_target":   {"type": "integer"},
-                "protein_target_g": {"type": "integer"},
+                "calorie_target":   {"type": "integer", "description": "Daily calories, theirs or their coach's. Never one you suggest."},
+                "protein_target_g": {"type": "integer", "description": "Daily protein in grams, theirs or their coach's."},
+                "water_target_l":   {"type": "number", "description": "Daily water in litres, theirs or their coach's."},
+                "targets_set_by": {
+                    "type": "string", "enum": ["user", "coach"],
+                    "description": "Whose targets these are: the person's own, or their coach's or trainer's.",
+                },
                 "issue": {
                     "type": "string",
                     "description": (
@@ -594,6 +600,7 @@ _LOCKED = (
 
 def _numbers(text: str) -> list[float]:
     """Every number in the text: digits ("94", "94.5") and number words ("sixteen")."""
+    text = re.sub(r"(?<=\d),(?=\d{3}\b)", "", text)   # 2,200 -> 2200
     found = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", text)]
     # Longest first, whole words only, so "sixteen" isn't read as "six"
     words = "|".join(sorted(list(_UNITS) + list(_TENS) + ["hundred"], key=len, reverse=True))
@@ -618,7 +625,8 @@ _AGE_WORDS = _mentions(r"\b(i'?m|i am|age|aged|turned|turning|years? old|birthda
 _GOAL_CHANGE_WORDS = _mentions(r"\b(goal|focus|switch\w*|chang\w*|instead|rather|actually|now|aim)\b")
 
 # What the user's own message must contain before a saved value can change
-# after onboarding. Each takes (raw message, new value as the user gave it).
+# after onboarding. Targets (confirmed with a yes) and the trainer (not locked)
+# are handled on their own. Each takes (raw message, new value as the user gave it).
 _EVIDENCE = {
     "name": lambda raw, v: bool(re.search(r"\b(name|call me|i'?m called|go by)\b", raw, re.I))
                            and str(v).lower() in raw.lower(),
@@ -629,10 +637,6 @@ _EVIDENCE = {
                            and bool(re.search(rf"\b({_GOAL_WORDS[v]})\b", raw, re.I)),
     "motivation": lambda raw, v: bool(re.search(
         r"\b(reason|why i (started|start)|motivat\w*|started because|got me started|what made me)\b", raw, re.I)),
-    "calorie_target": lambda raw, v: bool(re.search(r"\b(calories?|kcal|cals?)\b", raw, re.I))
-                                     and _says_number(raw, v),
-    "protein_target_g": lambda raw, v: bool(re.search(r"\bprotein\b", raw, re.I)) and _says_number(raw, v),
-    "trainer_name": lambda raw, v: bool(re.search(r"\b(trainer|coach|pt)\b", raw, re.I)),
     "disciplines": lambda raw, v: any(str(d).lower() in raw.lower() for d in v),
 }
 
@@ -737,25 +741,7 @@ def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict
             user.sex = sex
             saved["sex"] = sex
 
-    # Calorie floor — enforced in code, model must explain refusal
-    # Targets come only from the person: after onboarding the number has to be
-    # in their message, even when no target was set before
-    if "calorie_target" in inp and onboarded and not _EVIDENCE["calorie_target"](raw_body, inp["calorie_target"]):
-        refused["calorie_target"] = _LOCKED.format(field="calorie_target")
-    elif "calorie_target" in inp:
-        sex = user.sex
-        floor = CALORIE_FLOOR.get(sex, 1200)  # conservative default when sex unknown
-        if inp["calorie_target"] < floor:
-            refused["calorie_target"] = (
-                f"Refused: {inp['calorie_target']} kcal is below the safe minimum "
-                f"of {floor} kcal for {'women' if sex == 'F' else 'men'}. "
-                "Explain this to the user and carry on without setting a calorie target."
-            )
-        else:
-            profile = _profile(user, db)
-            profile.calorie_target = inp["calorie_target"]
-            profile.targets_set_by = "user"
-            saved["calorie_target"] = inp["calorie_target"]
+    needs_confirmation = _save_targets(inp, user, raw_msg_id, raw_body, onboarded, saved, refused, db)
 
     # The model may pass "perform better" or leave the goal out of a bare answer
     # like "perform". Code maps it; while the goal question is open, the message
@@ -790,19 +776,24 @@ def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict
             _profile(user, db).start_weight = kg
             saved["start_weight_kg"] = kg
 
-    if "protein_target_g" in inp and onboarded and not _EVIDENCE["protein_target_g"](raw_body, inp["protein_target_g"]):
-        refused["protein_target_g"] = _LOCKED.format(field="protein_target_g")
-    elif "protein_target_g" in inp:
-        _profile(user, db).protein_target_g = inp["protein_target_g"]
-        saved["protein_target_g"] = inp["protein_target_g"]
-
-    current_disciplines = user.profile.disciplines if user.profile else None
-    if "disciplines" in inp and locked("disciplines", current_disciplines, ",".join(inp["disciplines"]),
-                                       inp["disciplines"]):
-        pass
-    elif "disciplines" in inp:
-        _profile(user, db).disciplines = ",".join(inp["disciplines"])
-        saved["disciplines"] = inp["disciplines"]
+    # Sports are added to, never replaced. After onboarding each new one has to
+    # be named in their message.
+    if inp.get("disciplines"):
+        current = [d for d in ((user.profile.disciplines if user.profile else None) or "").split(",") if d]
+        have = {d.lower() for d in current}
+        new = []
+        for d in inp["disciplines"]:
+            d = " ".join(str(d).split())[:40]
+            if not d or d.lower() in have:
+                continue
+            if onboarded and not _EVIDENCE["disciplines"](raw_body, [d]):
+                refused["disciplines"] = f"{d!r} isn't in their message. Not saved."
+                continue
+            new.append(d)
+            have.add(d.lower())
+        if new:
+            _profile(user, db).disciplines = ",".join(current + new)
+            saved["disciplines_added"] = new
 
     # While the trainer question is open, "nobody" needs a message that says so.
     # If the model passed "" for a message that describes someone, the message
@@ -812,9 +803,14 @@ def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict
         inp = {**inp, "trainer_name": " ".join(raw_body.split())[:NOTE_MAX_CHARS]}
     if inp.get("trainer_name"):
         inp = {**inp, "trainer_name": " ".join(str(inp["trainer_name"]).split())[:NOTE_MAX_CHARS]}
-    if "trainer_name" in inp and locked("trainer_name", user.trainer_name, inp["trainer_name"] or None):
-        pass
-    elif "trainer_name" in inp:
+    # Who coaches them isn't locked: it's saved whenever they mention it. After
+    # onboarding an empty value only clears it if their message says so, since
+    # the model tends to replay old onboarding answers.
+    if (onboarded and inp.get("trainer_name") == ""
+            and not re.search(r"\b(no longer|stopped|quit|left|fired|don'?t have|not with|no (more )?(coach|trainer|pt))\b",
+                              raw_body, re.I)):
+        inp = {k: v for k, v in inp.items() if k != "trainer_name"}
+    if "trainer_name" in inp:
         user.trainer_name = inp["trainer_name"] or None
         saved["trainer_name"] = inp["trainer_name"]
 
@@ -875,13 +871,107 @@ def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict
     user.onboarding_step = step
     db.commit()
 
-    return {
+    result = {
         "saved": saved,
         "refused": refused,
         "onboarding_step": step,
         "next_question": ONBOARDING_LABELS.get(step),
         "onboarding_complete": step >= ONBOARDING_STEPS,
     }
+    if needs_confirmation:
+        result["needs_confirmation"] = needs_confirmation
+        result["message"] = _TARGETS_ASK
+    return result
+
+
+# Targets come from the person or their coach, never from us. After onboarding
+# they're saved only on a yes to our question naming them, and only if the
+# person said the number first. The calorie floor applies before anything else.
+_TARGET_FIELDS = {
+    # field: (label, unit, plausible range)
+    "calorie_target":   ("calories", " cal", (min(CALORIE_FLOOR.values()), 6000)),
+    "protein_target_g": ("protein", "g", (20, 400)),
+    "water_target_l":   ("water", "L", (0.5, 8)),
+}
+_TARGETS_ASK = (
+    "Targets not saved yet. Ask one yes/no question naming them and whose they are, like "
+    "'Want me to save 2200 cal and 160g protein as Dan's targets for you?'. Only after they "
+    "say yes, call save_profile again with the same values and targets_set_by."
+)
+_TARGETS_NOT_THEIRS = (
+    "Not saved: targets only come from the person or their coach, in their own words. "
+    "Never suggest one."
+)
+
+
+def _save_targets(inp: dict, user: User, raw_msg_id: int, raw_body: str, onboarded: bool,
+                  saved: dict, refused: dict, db: Session) -> dict:
+    """Saves the targets in inp that pass; returns those waiting on a yes."""
+    asked = {}
+    confirmed = {}
+    for field, (label, unit, (low, high)) in _TARGET_FIELDS.items():
+        if inp.get(field) in (None, ""):
+            continue
+        value = parse_number(inp[field])
+        if value is None:
+            refused[field] = f"Couldn't read a number from {inp[field]!r}. Not saved."
+            continue
+        if field == "calorie_target":
+            floor = CALORIE_FLOOR.get(user.sex, 1200)  # conservative default when sex unknown
+            if value < floor:
+                refused[field] = (
+                    f"Refused: {value:g} kcal is below the safe minimum of {floor} kcal for "
+                    f"{'women' if user.sex == 'F' else 'men'}. Explain this to the user and carry "
+                    "on without setting a calorie target."
+                )
+                continue
+        if not low <= value <= high:
+            refused[field] = f"{value:g}{unit} isn't a plausible daily {label} target. Not saved."
+            continue
+        if onboarded:
+            said_first = _user_said_number(user.user_id, raw_msg_id, value, db, include_current=True)
+            if not said_first:
+                refused[field] = _TARGETS_NOT_THEIRS
+                continue
+            if not (_YES_RE.match(raw_body) and _last_reply_names(user.user_id, raw_msg_id, value, db)
+                    and _user_said_number(user.user_id, raw_msg_id, value, db, include_current=False)):
+                asked[field] = f"{value:g}{unit}"
+                continue
+        confirmed[field] = int(value) if field != "water_target_l" else round(value, 1)
+
+    if confirmed:
+        profile = _profile(user, db)
+        for field, value in confirmed.items():
+            setattr(profile, field, value)
+            saved[field] = value
+        profile.targets_set_by = inp.get("targets_set_by") if inp.get("targets_set_by") in ("user", "coach") else "user"
+        saved["targets_set_by"] = profile.targets_set_by
+    return asked
+
+
+def _recent_rows(user_id: int, raw_msg_id: int, db: Session, limit: int = 6) -> list:
+    """This user's messages before this one, newest first, from the last 24 hours."""
+    return (db.query(RawMessage)
+            .filter(RawMessage.user_id == user_id, RawMessage.id < raw_msg_id,
+                    RawMessage.created_at >= datetime.utcnow() - timedelta(hours=24))
+            .order_by(RawMessage.id.desc())
+            .limit(limit)
+            .all())
+
+
+def _user_said_number(user_id: int, raw_msg_id: int, value: float, db: Session,
+                      include_current: bool) -> bool:
+    bodies = [r.body for r in _recent_rows(user_id, raw_msg_id, db)]
+    if include_current:
+        current = db.get(RawMessage, raw_msg_id)
+        bodies.append(current.body if current else "")
+    return any(_says_number(b or "", value) for b in bodies)
+
+
+def _last_reply_names(user_id: int, raw_msg_id: int, value: float, db: Session) -> bool:
+    """Our previous reply asked a question and named this number."""
+    rows = [r for r in _recent_rows(user_id, raw_msg_id, db, limit=1) if r.reply_text]
+    return bool(rows and "?" in rows[0].reply_text and _says_number(rows[0].reply_text, value))
 
 
 _NO_TRAINER_RE = re.compile(

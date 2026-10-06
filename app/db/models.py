@@ -51,7 +51,8 @@ class Profile(Base):
     start_weight     = Column(Float,  nullable=True)
     calorie_target   = Column(Integer, nullable=True)
     protein_target_g = Column(Integer, nullable=True)
-    targets_set_by   = Column(String, nullable=True)   # user | coach
+    water_target_l   = Column(Float,  nullable=True)
+    targets_set_by   = Column(String, nullable=True)   # user | coach (theirs, never ours)
     disciplines      = Column(String, nullable=True)   # comma-separated
     motivation       = Column(String(200), nullable=True)  # why they started, in their words
 

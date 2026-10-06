@@ -60,6 +60,9 @@ A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
 - Safety rules live in code, not the prompt: the under-18 block (fixed reply, no
   model call, data deleted, nothing stored), check-in range checks, and the
   forced `log_checkin` safety net. The prompt can explain them, never replace them.
+- Targets are the person's or their coach's, never the coach's suggestion:
+  code saves one only on a yes to our question naming a number they said
+  first, and the calorie floor comes before that.
 - Never trust a confirmation flag the model sets. After onboarding, saved profile
   values change only when the user's own message backs it up (`_EVIDENCE` in
   tools.py); `is_correction` needs correction words or a yes to our question.
@@ -89,7 +92,11 @@ local time and part of day in the context block, once-a-day injury
 reminders tracked in code, note start/end dates with status computed in
 code (migration 009), and "they check in with you" in coach.md (new persona
 rohan; rohan, tom, lena, maya, nadia pass). Then get_history, the rule never
-to call data missing without it, and /summary [days] (new persona kim).
+to call data missing without it, and /summary [days] (new persona kim). Then
+the profile learns from chat: trainer saved whenever mentioned (not locked),
+sports added, calorie/protein/water targets saved after a yes to our question
+about a number they said first, with targets_set_by (migration 010; new
+persona dev).
 
 Phase 2, part 1 is built and passes the code-level checks, but hasn't been
 tried on a phone yet: Telegram layer, polling, webhook, allowlist, consent,

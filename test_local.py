@@ -978,6 +978,56 @@ def _kim_summary_matches_db(ctx: Ctx) -> CheckResult:
     return ok, f"table={table}, db={expected}, html={sent_html}"
 
 
+# Dev: profile facts picked up in normal chat after onboarding.
+_DEV_TARGETS = "Dan wants me on 2200 cal and 160g protein"
+_DEV_LOW = "set my calories to 900"
+
+
+def _dev_profile(ctx: Ctx) -> CheckResult:
+    u = _user(ctx)
+    p = u.profile
+    ok = (bool(u.trainer_name and "dan" in u.trainer_name.lower())
+          and bool(p and p.disciplines and "muay thai" in p.disciplines.lower()))
+    return ok, f"trainer={u.trainer_name!r}, disciplines={p.disciplines if p else None!r}"
+
+
+def _dev_targets(ctx: Ctx) -> CheckResult:
+    p = _user(ctx).profile
+    got = (p.calorie_target, p.protein_target_g, p.targets_set_by) if p else None
+    return got == (2200, 160, "coach"), f"(calories, protein, set by)={got}"
+
+
+def _dev_asked_first(ctx: Ctx) -> CheckResult:
+    """The targets message gets one yes/no question naming them, nothing saved yet."""
+    s = next((x for x in ctx.sent if x.message == _DEV_TARGETS), None)
+    saved_then = [r.get("saved", {}) for n, _, r in (s.tools if s else []) if n == "save_profile"]
+    ok = bool(s) and s.reply.count("?") == 1 and "2200" in s.reply.replace(",", "") and not any(
+        "calorie_target" in sv for sv in saved_then)
+    return ok, f"reply: {s.reply if s else None!r}, saved on that turn: {saved_then}"
+
+
+def _dev_low_refused(ctx: Ctx) -> CheckResult:
+    p = _user(ctx).profile
+    reply = _reply(ctx, _DEV_LOW)
+    offers = [q for q in _questions(reply) if "900" in q]
+    return p.calorie_target == 2200 and not offers, f"calories={p.calorie_target}, reply: {reply!r}"
+
+
+def _dev_mydata(ctx: Ctx) -> CheckResult:
+    """/mydata through the Telegram handler shows the coach, the sport and the targets."""
+    chat = "5550200"
+    u = _user(ctx)
+    u.telegram_chat_id = chat
+    ctx.db.commit()
+    with _telegram(chat) as t:
+        t.send(_tg_text(chat, "/mydata"), ctx.db)
+        text = "\n".join(t.api.texts(chat))
+    want = ["Coach or trainer: Dan", "Muay Thai", "Calorie target: 2200 kcal",
+            "Protein target: 160g", "Targets set by: your coach"]
+    missing = [w for w in want if w.lower() not in text.lower()]
+    return not missing, f"missing: {missing}"
+
+
 PERSONAS = [
     Persona(
         name="priya",
@@ -1209,6 +1259,26 @@ PERSONAS = [
             ("points to /summary for the table", _kim_points_to_summary),
             ("never says existing data is missing", _kim_no_missing_claim),
             ("/summary 10 table matches the DB", _kim_summary_matches_db),
+        ],
+    ),
+    Persona(
+        name="dev",
+        summary="Coach, sport and targets mentioned in chat after onboarding, then /mydata",
+        steps=[
+            "hi", "Dev", "29", "male", "80", "build muscle", "want to get strong", "no", "no",
+            "80.4 slept 7h, squats today with my coach Dan",
+            "did Muay Thai today too, great session",
+            _DEV_TARGETS,
+            "yes",
+            _DEV_LOW,
+        ],
+        checks=[
+            ("onboarding complete", onboarding_complete),
+            ("trainer Dan and Muay Thai saved from chat", _dev_profile),
+            ("targets get one confirming question first", _dev_asked_first),
+            ("after yes: 2200 cal, 160g protein, set by coach", _dev_targets),
+            ("900 cal refused, 2200 kept, nothing offered", _dev_low_refused),
+            ("/mydata shows coach, sport and targets", _dev_mydata),
         ],
     ),
     Persona(
@@ -1476,6 +1546,47 @@ def _code_history(db) -> CheckResult:
     ok = (wide["from"] == str(t - timedelta(days=59)) and merged and "error" in bad
           and "legs &lt;heavy&gt;" in text and "<heavy>" not in text)
     return ok, f"from={wide['from']}, rows={rows}, bad={bad}, escaped={'&lt;heavy&gt;' in text}"
+
+
+def _code_profile_from_chat(db) -> CheckResult:
+    """After onboarding: the trainer saves without asking and isn't wiped by a replayed
+    "", sports are added to, and targets need a yes to our question about a number
+    they said first. A target we proposed, or one under the floor, is refused."""
+    uid = _onboarded_user(db)
+    u = db.get(User, uid)
+    u.sex = "M"
+    u.profile.disciplines = "gym"
+    db.commit()
+    wrong = []
+    _save(db, uid, "squats today with my coach Dan", {"trainer_name": "Dan"})
+    _save(db, uid, "80.2 slept 7h", {"trainer_name": ""})
+    if db.get(User, uid).trainer_name != "Dan":
+        wrong.append(f"trainer={db.get(User, uid).trainer_name!r}")
+    _save(db, uid, "did Muay Thai today", {"disciplines": ["Muay Thai", "gym"]})
+    if db.get(User, uid).profile.disciplines != "gym,Muay Thai":
+        wrong.append(f"disciplines={db.get(User, uid).profile.disciplines!r}")
+
+    first = _save(db, uid, "Dan wants me on 2,200 cal and 160g protein",
+                  {"calorie_target": 2200, "protein_target_g": 160, "targets_set_by": "coach"})
+    if db.get(User, uid).profile.calorie_target is not None or "needs_confirmation" not in first:
+        wrong.append("saved before a yes")
+    last = db.query(RawMessage).filter(RawMessage.user_id == uid).order_by(RawMessage.id.desc()).first()
+    last.reply_text = "Want me to save 2200 cal and 160g protein as Dan's targets?"
+    db.commit()
+    _save(db, uid, "yes", {"calorie_target": 2200, "protein_target_g": 160, "targets_set_by": "coach"})
+    p = db.get(User, uid).profile
+    if (p.calorie_target, p.protein_target_g, p.targets_set_by) != (2200, 160, "coach"):
+        wrong.append(f"after yes: {(p.calorie_target, p.protein_target_g, p.targets_set_by)}")
+
+    m = RawMessage(user_id=uid, body="what should I eat", reply_text="How about 1800 cal a day?")
+    db.add(m)
+    db.commit()
+    ours = _save(db, uid, "yes", {"calorie_target": 1800})
+    low = _save(db, uid, "set my calories to 900", {"calorie_target": 900})
+    if db.get(User, uid).profile.calorie_target != 2200 or "calorie_target" not in ours["refused"] \
+            or "safe minimum" not in low["refused"].get("calorie_target", ""):
+        wrong.append(f"proposed or low target got through: {ours['refused']}, {low['refused']}")
+    return not wrong, f"wrong: {wrong}"
 
 
 def _code_profile_locked(db) -> CheckResult:
@@ -1770,6 +1881,7 @@ CODE_CHECKS = [
     ("injury reminder line flips once a reply names the body part", _code_issue_reminder),
     ("context shows Singapore local time and part of day", _code_local_time),
     ("get_history merges a day, caps at 60; /summary escapes HTML", _code_history),
+    ("trainer, sports and confirmed targets update from chat", _code_profile_from_chat),
     ("telegram: allowlist turns strangers away and stores nothing", _code_tg_allowlist),
     ("telegram: wrong webhook secret gets 401", _code_tg_webhook_secret),
     ("telegram: duplicate update_id handled once", _code_tg_duplicate),

@@ -46,10 +46,20 @@ value and is_correction=true. If they say no, leave it as it is.
 language and carry on without setting a target.
 - Never ask for anything already listed under PROFILE: name, age, sex, goal \
 or weight.
-- After onboarding, only call save_profile to change a saved value when their \
-message explicitly says to change that value ("my starting weight was \
-actually 94"). A check-in weight is not a new starting weight. Code refuses \
-any change the message doesn't back up.
+- After onboarding, only call save_profile to change name, age, sex, goal, \
+starting weight or motivation when their message explicitly says to change \
+that value ("my starting weight was actually 94"). A check-in weight is not a \
+new starting weight. Code refuses any change the message doesn't back up.
+- Durable facts about them go somewhere that lasts: a profile field if one \
+fits, otherwise remember. Who coaches them or tracks their food or weight: \
+save_profile trainer_name, straight away, no need to ask. A sport or kind of \
+training they do: save_profile disciplines (only new ones). Never use a fact \
+for one reply and drop it.
+- Targets: when they state a calorie, protein or water target, their own or \
+their coach's, call save_profile with it and targets_set_by ("user" or \
+"coach"). Code will hold it back and ask you to confirm: ask one yes/no \
+question naming the targets and whose they are, and when they say yes, call \
+save_profile again with the same values. Never propose a target yourself.
 - Never ask about a field listed under "Fields already reminded about today".
 - remember: save things that will matter in later conversations: schedule, \
 travel, events, likes and dislikes, work or family context that affects \
@@ -254,6 +264,8 @@ def _context_block(user: User, db: Session) -> str:
             targets.append(f"{profile.calorie_target} cal")
         if profile.protein_target_g:
             targets.append(f"{profile.protein_target_g}g protein")
+        if profile.water_target_l:
+            targets.append(f"{profile.water_target_l:g}L water")
         if targets:
             lines.append(f"Targets: {', '.join(targets)} (set by {profile.targets_set_by}).")
     if profile and profile.motivation:

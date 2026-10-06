@@ -75,7 +75,9 @@ def format_mydata(user: Optional[User], db: Session) -> str:
               f"Starting weight: {_val(p.start_weight if p else None, 'kg')}",
               f"Calorie target: {_val(p.calorie_target if p else None, ' kcal')}",
               f"Protein target: {_val(p.protein_target_g if p else None, 'g')}",
-              f"Trainer: {_val(user.trainer_name)}",
+              f"Water target: {_val(p.water_target_l if p else None, 'L')}",
+              f"Targets set by: {_val({'user': 'you', 'coach': 'your coach'}.get(p.targets_set_by) if p else None)}",
+              f"Coach or trainer: {_val(user.trainer_name)}",
               f"Sports: {_val(p.disciplines if p else None)}",
               f"Why you started: {_val(p.motivation if p else None)}"]
 
