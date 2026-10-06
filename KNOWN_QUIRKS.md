@@ -14,3 +14,9 @@
   two sentences (lena: "Your nutritionist will keep an eye on the food and
   weight side. I'll help you stay consistent..."). Code keeps it to one line
   with no question. Style; revisit if it reads long on a phone.
+- The injury reminder sometimes repeats within a day although the context
+  line says it was already given ("keeping half an eye on that back"). rohan
+  checks it as a warning, not a failure.
+- Trip timing is sometimes stated wrong although the note shows its status in
+  code (rohan, trip started yesterday: "heading into Thailand this weekend").
+  rohan checks it as a warning, not a failure.

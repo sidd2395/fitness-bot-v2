@@ -34,7 +34,7 @@ def _wrap(text: str, indent: str = "") -> list[str]:
 
 
 def day_lines(row: dict) -> list[str]:
-    """ "Thu 2 Oct  95.0kg · 8h sleep", then training, energy and food on indented
+    """ "Thu 2 Oct 95.0kg · 8h sleep", then training, energy and food on indented
     lines. Empty fields are left out."""
     numbers = []
     if row["weight_kg"] is not None:
@@ -43,7 +43,7 @@ def day_lines(row: dict) -> list[str]:
         numbers.append(f"{row['sleep_hours']:g}h sleep")
     first = _day(row["date"])
     if numbers:
-        joined = f"{first}  {' · '.join(numbers)}"
+        joined = f"{first} {' · '.join(numbers)}"
         lines = [joined] if len(joined) <= LINE_WIDTH else [first] + _wrap(" · ".join(numbers), INDENT)
     else:
         lines = [first]

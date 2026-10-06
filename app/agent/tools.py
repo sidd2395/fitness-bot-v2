@@ -1214,3 +1214,63 @@ def _get_history(inp: dict, user_id: int, db: Session) -> dict:
                           "wasn't logged that day. This is the whole record for these days."),
         "active_issues": [i.what for i in user.issues if i.status == "active"],
     }
+
+
+
+# ---------------------------------------------------------------------------
+# Sports named in a message, added to disciplines in code (the model doesn't
+# always call save_profile for "did Muay Thai today")
+# ---------------------------------------------------------------------------
+
+SPORTS = {
+    "Muay Thai":   r"muay\s*thai|thai\s*boxing",
+    "Boxing":      r"(?<!thai )(?<!kick)boxing|boxed",
+    "Kickboxing":  r"kick\s*boxing",
+    "BJJ":         r"bjj|jiu[\s-]*jitsu|grappling",
+    "MMA":         r"mma",
+    "Running":     (r"running(?!\s+(late|out|low|behind|errands|around|a\b))|jogg?ing|parkrun|"
+                    r"\d+\s*(k|km)\s+(\w+\s+)?run|(easy|long|tempo|morning|evening) run|"
+                    r"went for a run|ran \d+\s*(k|km|miles?)"),
+    "Cycling":     r"cycling|bike ride|spin class|spinning",
+    "Swimming":    r"swimming|swim session|laps in the pool|swam",
+    "Gym":         r"gym",
+    "Weights":     r"weights|weight\s*lifting|lifting|powerlifting",
+    "Yoga":        r"yoga",
+    "Pilates":     r"pilates",
+    "HIIT":        r"hiit",
+    "CrossFit":    r"cross\s*fit",
+    "Football":    r"football|futsal|soccer",
+    "Badminton":   r"badminton",
+    "Tennis":      r"tennis",
+    "Squash":      r"squash",
+    "Basketball":  r"basketball",
+    "Climbing":    r"climbing|bouldering",
+    "Rowing":      r"rowing",
+    "Hiking":      r"hiking|hike",
+    "Dance":       r"dance class|dancing|zumba",
+    "Netball":     r"netball",
+}
+_SPORT_RES = {name: re.compile(rf"\b({pattern})\b", re.I) for name, pattern in SPORTS.items()}
+
+
+def sports_in(message: str) -> list[str]:
+    """Sports and kinds of training named in the message, in SPORTS order."""
+    return [name for name, rx in _SPORT_RES.items() if rx.search(message or "")]
+
+
+def add_sports_from_message(user_id: int, message: str, db: Session) -> list[str]:
+    """Adds any sport the message names that isn't saved yet. Returns what was added."""
+    found = sports_in(message)
+    if not found:
+        return []
+    user = db.get(User, user_id)
+    if user is None or not _onboarded(user):
+        return []
+    profile = _profile(user, db)
+    current = [d for d in (profile.disciplines or "").split(",") if d]
+    have = {d.lower() for d in current}
+    new = [s for s in found if s.lower() not in have]
+    if new:
+        profile.disciplines = ",".join(current + new)
+        db.commit()
+    return new

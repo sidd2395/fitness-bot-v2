@@ -11,7 +11,8 @@ from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
 from app.db.models import RawMessage, User
-from app.agent.tools import ONBOARDING_STEPS, TOOL_SCHEMAS, dispatch, only_from_message
+from app.agent.tools import (ONBOARDING_STEPS, TOOL_SCHEMAS, add_sports_from_message, dispatch,
+                             only_from_message)
 from app.agent.context import build_system_prompt, build_trainer_ack_prompt
 from app.pricing import cost_usd, usage_counts
 
@@ -90,6 +91,11 @@ def run(user_id: int, message: str, db: Session) -> str:
     # message, this one included, so there is nothing to write the reply to
     if user.blocked:
         return reply
+
+    # Sports they name go into disciplines in code, whatever the model did
+    added = add_sports_from_message(user_id, message, db)
+    if added:
+        _log("sports_added", user_id, ",".join(added))
 
     # Save the reply and mark processed in one commit.
     # reply_text is written regardless of status so failed rows still show what the user saw.
