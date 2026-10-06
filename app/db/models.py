@@ -115,6 +115,7 @@ class Checkin(Base):
     calories     = Column(Integer, nullable=True)
     protein_g    = Column(Float,   nullable=True)
     water_l      = Column(Float,   nullable=True)
+    food_note    = Column(Text,    nullable=True)        # food in their words; never turned into numbers
     raw_message  = Column(Text,    nullable=False)
     corrected_at = Column(DateTime, nullable=True)
     nudged_fields = Column(Text,   nullable=True)        # comma-separated fields the bot reminded them about

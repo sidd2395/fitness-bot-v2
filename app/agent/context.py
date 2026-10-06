@@ -27,6 +27,9 @@ If it is only a question or chat, do not call log_checkin.
 never before or alongside a tool call. The reply is everything the person \
 sees, so warnings and advice go there, not in text next to a tool call.
 - Never refuse a partial check-in. Save whatever was given.
+- Food in plain words ("ate lighter", "big dinner out") goes in log_checkin \
+food_note, as they said it. Never turn it into calories or protein, and never \
+estimate a number they didn't give.
 - Earlier messages in this conversation are real. Use them to make sense of \
 short replies like "yes", "no", "so what now" or "thanks".
 - If log_checkin returns rejected fields, those were not saved. Ask what \
@@ -365,6 +368,7 @@ def _context_block(user: User, db: Session) -> str:
             if c.sleep_hours: row += f"  {c.sleep_hours}h"
             if c.training:    row += f"  {c.training}"
             if c.energy:      row += f"  energy {c.energy}/5"
+            if c.food_note:   row += f"  food: {c.food_note}"
             lines.append(row)
 
     return "\n".join(lines)

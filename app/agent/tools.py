@@ -74,8 +74,16 @@ TOOL_SCHEMAS = [
                         "exhausted or wrecked = 1, tired or flat = 2, okay = 3, good = 4, great = 5."
                     ),
                 },
-                "calories":  {"type": "integer"},
-                "protein_g": {"type": "number"},
+                "calories":  {"type": "integer", "description": "Only a number they gave. Never estimate."},
+                "protein_g": {"type": "number", "description": "Only a number they gave. Never estimate."},
+                "food_note": {
+                    "type": "string",
+                    "description": (
+                        "What they ate, in their own words, when they describe food without "
+                        "numbers: 'ate lighter', 'big dinner out', 'skipped lunch'. Short. Never "
+                        "turn it into calories or protein."
+                    ),
+                },
                 "water_l":   {"type": "number"},
                 "is_correction": {
                     "type": "boolean",
@@ -396,7 +404,8 @@ def _log_checkin(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict:
     target_date = today if inp.get("date", "today") == "today" else today - timedelta(days=1)
     entry_type = inp["entry_type"]
 
-    DATA_FIELDS = ("weight_kg", "sleep_hours", "training", "energy", "calories", "protein_g", "water_l")
+    DATA_FIELDS = ("weight_kg", "sleep_hours", "training", "energy", "calories", "protein_g", "water_l",
+                   "food_note")
     NUDGE_FIELDS = ("weight_kg", "sleep_hours")
     # Weight and sleep happen once a day, so a value in the day's other entry
     # (morning vs evening) counts as already saved. Energy, training and food
@@ -417,6 +426,16 @@ def _log_checkin(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict:
             del inp["weight_kg"]
         else:
             inp["weight_kg"] = kg
+
+    # Food numbers only come from them. "Big dinner out" is a food_note, never an
+    # estimate in calories; a yes to a correction can carry a number from before.
+    for field in ("calories", "protein_g"):
+        if inp.get(field) is not None and not is_correction and not _says_number(raw_body, inp[field]):
+            rejected[field] = ("Not in their message, so not saved. Only save food numbers they "
+                               "give; describe what they ate in food_note instead.")
+            del inp[field]
+    if inp.get("food_note"):
+        inp["food_note"] = " ".join(str(inp["food_note"]).split())[:NOTE_MAX_CHARS]
 
     # Range checks before anything else: rejected values are dropped from the input
     for field in CHECKIN_RANGES:

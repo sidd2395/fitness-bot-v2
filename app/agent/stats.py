@@ -269,7 +269,7 @@ _DAY_FIELDS = ("weight_kg", "sleep_hours", "energy", "calories", "protein_g", "w
 def daily_history(user_id: int, db: Session, days: int, today: date) -> list[dict]:
     """One dict per day with a check-in, oldest first, over the last `days` days
     including today. A day's morning and evening entries are merged: the later
-    entry's value wins for each number, training from both is kept."""
+    entry's value wins for each number, training and food notes from both are kept."""
     start = today - timedelta(days=days - 1)
     rows = (db.query(Checkin)
             .filter(Checkin.user_id == user_id, Checkin.date >= start, Checkin.date <= today)
@@ -277,16 +277,19 @@ def daily_history(user_id: int, db: Session, days: int, today: date) -> list[dic
             .all())
     by_day: dict = {}
     for c in rows:
-        day = by_day.setdefault(c.date, {"date": c.date, "training": [],
+        day = by_day.setdefault(c.date, {"date": c.date, "training": [], "food_note": [],
                                          **{f: None for f in _DAY_FIELDS}})
         for f in _DAY_FIELDS:
             if getattr(c, f) is not None:
                 day[f] = getattr(c, f)
-        if c.training and c.training not in day["training"]:
-            day["training"].append(c.training)
+        for text_field in ("training", "food_note"):
+            value = getattr(c, text_field)
+            if value and value not in day[text_field]:
+                day[text_field].append(value)
     out = []
     for d in by_day.values():
         d["training"] = "; ".join(d["training"]) or None
+        d["food_note"] = "; ".join(d["food_note"]) or None
         out.append(d)
     return out
 
