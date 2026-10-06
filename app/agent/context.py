@@ -5,7 +5,8 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Checkin, Note, RawMessage, User
 from app.agent.stats import (claim_milestone, compute as compute_stats, describe_sleep_run,
-                             weight_change_since_last)
+                             note_timing, weight_change_since_last)
+from app import clock
 from app.agent.tools import ONBOARDING_LABELS, ONBOARDING_STEPS
 
 # --------------------------------------------------------------------------- #
@@ -59,6 +60,14 @@ and health issues (save_profile issue). Don't save what is already under NOTES.
 - When FOLLOW-UPS DUE lists a note, ask about it naturally in this reply and \
 call resolve_note with its id in the same turn, so you only ask once. Also \
 resolve a note when they tell you it's no longer true.
+- Injury reminders: each active issue has a line in the context block. \
+"reminder already given today": don't mention it again today, not even in \
+passing or in a question, unless their message mentions an exercise or pain \
+that affects it. "reminder given today: no": \
+remind them once if today's training touches it.
+- remember: for a trip or event with dates, pass starts_on and ends_on, \
+worked out from today's date. Code then shows whether it's upcoming, \
+happening now or over.
 - Check-in requests: the context block has one line about this, and it \
 decides. "No check-in yet": before their first ever check-in, one gentle \
 invitation to send it is fine, at most one per reply. "Already asked today": \
@@ -188,6 +197,18 @@ def _follow_up(note: Note) -> str:
     return f" (follow up {note.follow_up_on.strftime('%a %d %b')})" if note.follow_up_on else ""
 
 
+def _note_line(note: Note, today: date) -> str:
+    """A note with its dates and where it stands today, worked out here."""
+    line = f"- [{note.note_id}] {note.text}"
+    timing = note_timing(note.starts_on, note.ends_on, today)
+    if timing:
+        start = note.starts_on or note.ends_on
+        end = note.ends_on or note.starts_on
+        span = start.strftime("%a %d %b") + ("" if end == start else f" to {end.strftime('%a %d %b')}")
+        line += f" ({span}: {timing})"
+    return line + _follow_up(note)
+
+
 def _context_block(user: User, db: Session) -> str:
     today = date.today()
     profile = user.profile
@@ -205,6 +226,9 @@ def _context_block(user: User, db: Session) -> str:
     today_checkins = [c for c in recent if c.date == today]
 
     lines: list[str] = [f"Today: {today.strftime('%A %d %B %Y')} ({today.isoformat()})."]
+    now = clock.now_local()
+    lines.append(f"Local time: {now:%H:%M} Singapore, {clock.part_of_day(now.hour)}. Anything they "
+                 "said they'd do later today hasn't happened unless they've told you it has.")
 
     # --- Profile ----------------------------------------------------------- #
     lines.append("")
@@ -235,6 +259,8 @@ def _context_block(user: User, db: Session) -> str:
         lines.append("ACTIVE ISSUES")
         for issue in active_issues:
             lines.append(f"- {issue.what} (since {issue.first_mentioned.strftime('%d %b')})")
+        for issue in active_issues:
+            lines.append(issue_reminder_line(issue, user.user_id, today, db))
 
     # --- Computed facts — code does the maths, model reads the numbers ------ #
     lines.append("")
@@ -301,13 +327,13 @@ def _context_block(user: User, db: Session) -> str:
         lines.append("")
         lines.append("NOTES (newest first, id in brackets)")
         for n in open_notes[:NOTES_SHOWN]:
-            lines.append(f"- [{n.note_id}] {n.text}{_follow_up(n)}")
+            lines.append(_note_line(n, today))
     due = [n for n in open_notes if n.follow_up_on and n.follow_up_on <= today]
     if due:
         lines.append("")
         lines.append("FOLLOW-UPS DUE (ask about one naturally, then resolve_note it)")
         for n in sorted(due, key=lambda n: n.follow_up_on):
-            lines.append(f"- [{n.note_id}] {n.text}{_follow_up(n)}")
+            lines.append(_note_line(n, today))
 
     # --- Last 3 days -------------------------------------------------------- #
     if recent:
@@ -374,3 +400,55 @@ def _checkin_requested_today(user_id: int, today: date, db: Session) -> bool:
         .all()
     )
     return any(asks_for_checkin(r.reply_text) for r in replies)
+
+
+
+# --------------------------------------------------------------------------- #
+# Has a reply today already reminded them about an injury?                      #
+# Same idea as check-in requests: worked out from today's replies, so the       #
+# reminder is given once a day, not in every reply.                             #
+# --------------------------------------------------------------------------- #
+
+# Body parts an issue can name. "back" only counts with a word that makes it the
+# body part, since "you're back at it" isn't a back reminder.
+_BODY_PARTS = ("knee", "shoulder", "hip", "ankle", "wrist", "neck", "elbow", "hamstring", "calf",
+               "achilles", "foot", "groin", "quad", "glute", "spine", "rib", "chest", "hand")
+_BACK_RE = re.compile(r"\b((lower|upper|mid|your|the|that|his|her|my)\s+back|back\s+(pain|strain|injury|"
+                      r"surgery|issue|problem)|back-loading|loads? (the|your) back)\b", re.I)
+
+
+def issue_body_part(issue_text: str) -> str:
+    """The body part an issue is about, for naming its reminder; "injury" if none."""
+    if _BACK_RE.search(issue_text) or re.search(r"\bback\b", issue_text, re.I):
+        return "back"
+    for part in _BODY_PARTS:
+        if re.search(rf"\b{part}s?\b", issue_text, re.I):
+            return part
+    return "injury"
+
+
+def mentions_issue(reply: str, issue_text: str) -> bool:
+    """True if the reply brings up this issue: its body part, or for an issue with
+    no body part, the issue's own wording."""
+    part = issue_body_part(issue_text)
+    if part == "back":
+        return bool(_BACK_RE.search(reply or ""))
+    if part != "injury":
+        return bool(re.search(rf"\b{part}s?\b", reply or "", re.I))
+    words = [w for w in re.findall(r"[a-z]{5,}", issue_text.lower())]
+    return any(re.search(rf"\b{w}\b", reply or "", re.I) for w in words[:3])
+
+
+def issue_reminder_line(issue, user_id: int, today: date, db: Session) -> str:
+    part = issue_body_part(issue.what)
+    label = part.capitalize() if part != "injury" else f'"{issue.what[:40]}"'
+    start = datetime.combine(today, time.min).astimezone(timezone.utc).replace(tzinfo=None)
+    replies = (db.query(RawMessage.reply_text)
+               .filter(RawMessage.user_id == user_id, RawMessage.created_at >= start,
+                       RawMessage.reply_text.isnot(None))
+               .all())
+    if any(mentions_issue(r.reply_text, issue.what) for r in replies):
+        return (f"{label} reminder already given today: don't mention it again today, not even "
+                "in passing or in a question, unless their message mentions an exercise or pain "
+                "that affects it.")
+    return f"{label} reminder given today: no."

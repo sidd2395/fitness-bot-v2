@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Checkin, Issue, Note, Profile, RawMessage, User
 from app.agent.stats import (claim_milestone, compute as compute_stats, describe_sleep_run,
-                             weight_change_since_last)
+                             note_timing, weight_change_since_last)
 
 CALORIE_FLOOR = {"M": 1500, "F": 1200}
 
@@ -169,6 +169,18 @@ TOOL_SCHEMAS = [
                         "usually the day after an event or trip ends. Work it out from "
                         "today's date in the context block. Omit if there's nothing to follow up."
                     ),
+                },
+                "starts_on": {
+                    "type": "string",
+                    "description": (
+                        "YYYY-MM-DD. For a trip or event with dates: the first day. Work it out "
+                        "from today's date. Code uses it to say whether it's upcoming, happening "
+                        "now or over. Omit for notes without dates."
+                    ),
+                },
+                "ends_on": {
+                    "type": "string",
+                    "description": "YYYY-MM-DD. The last day of the trip or event. Omit for a one-day event.",
                 },
             },
             "required": ["text"],
@@ -969,6 +981,22 @@ def _remember(inp: dict, user_id: int, db: Session) -> dict:
                 "now. Not saved. Work it out again from today's date."
             )}
 
+    dates = {}
+    for field in ("starts_on", "ends_on"):
+        if inp.get(field):
+            try:
+                dates[field] = date.fromisoformat(str(inp[field]))
+            except ValueError:
+                return {"saved": False, "error": f"{field} {inp[field]!r} isn't YYYY-MM-DD. Not saved."}
+            if abs((dates[field] - date.today()).days) > FOLLOW_UP_MAX_DAYS:
+                return {"saved": False, "error": (
+                    f"{field} {dates[field]} is more than a year from today ({date.today()}). "
+                    "Not saved. Work it out again from today's date."
+                )}
+    starts_on, ends_on = dates.get("starts_on"), dates.get("ends_on")
+    if starts_on and ends_on and ends_on < starts_on:
+        return {"saved": False, "error": f"ends_on {ends_on} is before starts_on {starts_on}. Not saved."}
+
     open_notes = db.query(Note).filter(Note.user_id == user_id, Note.resolved.is_(False)).all()
     if any(n.text.lower() == text.lower() for n in open_notes):
         return {"saved": False, "already_saved": True}
@@ -978,10 +1006,15 @@ def _remember(inp: dict, user_id: int, db: Session) -> dict:
             "Resolve one that no longer matters first."
         )}
 
-    note = Note(user_id=user_id, text=text, follow_up_on=follow_up_on)
+    note = Note(user_id=user_id, text=text, follow_up_on=follow_up_on, starts_on=starts_on, ends_on=ends_on)
     db.add(note)
     db.commit()
-    return {"saved": True, "note_id": note.note_id, "follow_up_on": str(follow_up_on) if follow_up_on else None}
+    result = {"saved": True, "note_id": note.note_id,
+              "follow_up_on": str(follow_up_on) if follow_up_on else None}
+    timing = note_timing(starts_on, ends_on, date.today())
+    if timing:
+        result["timing"] = timing
+    return result
 
 
 def _resolve_note(inp: dict, user_id: int, db: Session) -> dict:

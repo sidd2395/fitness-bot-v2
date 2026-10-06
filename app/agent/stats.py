@@ -232,3 +232,26 @@ def claim_milestone(user_id: int, db: Session, today: date) -> Optional[str]:
         db.add(Milestone(user_id=user_id, kind=kind, reached_on=today))
     db.commit()
     return MILESTONES[kinds[0]]
+
+
+def note_timing(starts_on: Optional[date], ends_on: Optional[date], today: date) -> Optional[str]:
+    """Where a dated note stands today, so the model never works it out from the
+    text: upcoming in N days, happening now, or ended N days ago. None if undated."""
+    if starts_on is None and ends_on is None:
+        return None
+    start = starts_on or ends_on
+    end = ends_on or starts_on
+
+    def days(n: int) -> str:
+        return f"{n} day{'s' if n != 1 else ''}"
+
+    if today < start:
+        n = (start - today).days
+        return "upcoming, starts tomorrow" if n == 1 else f"upcoming, starts in {days(n)}"
+    if today <= end:
+        if start == end:
+            return "today"
+        left = (end - today).days
+        return "happening now, last day today" if left == 0 else f"happening now, ends in {days(left)}"
+    n = (today - end).days
+    return "ended yesterday" if n == 1 else f"ended {days(n)} ago"

@@ -8,13 +8,14 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Optional
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.agent.loop import run
+from app.clock import day_start_utc
 from app.db import delete_user
 from app.db.models import RawMessage, TelegramUpdate, User
 from app.db.session import SessionLocal
@@ -26,7 +27,6 @@ logger = logging.getLogger(__name__)
 DAILY_TURN_CAP = 40               # messages that reach the agent, per user per Singapore day
 MESSAGE_INTERVAL_S = 2.0          # one message per this many seconds per user
 UPDATE_ID_RETENTION = timedelta(days=7)
-SINGAPORE = timezone(timedelta(hours=8))  # no daylight saving
 
 
 class RateLimiter:
@@ -240,13 +240,6 @@ def _first_time(update_id: Optional[int], db: Session) -> bool:
         db.query(TelegramUpdate).filter(TelegramUpdate.received_at < cutoff).delete()
         db.commit()
     return True
-
-
-def day_start_utc(now: Optional[datetime] = None) -> datetime:
-    """Midnight Singapore time today, as naive UTC like the created_at columns."""
-    now = now or datetime.now(timezone.utc)
-    midnight = now.astimezone(SINGAPORE).replace(hour=0, minute=0, second=0, microsecond=0)
-    return midnight.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def turns_today(user_id: int, db: Session) -> int:

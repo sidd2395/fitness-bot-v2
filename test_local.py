@@ -70,6 +70,11 @@ from app.agent.stats import (compute as compute_stats, describe_sleep_run,  # no
 from app.agent.tools import MAX_OPEN_NOTES, ONBOARDING_STEPS, dispatch  # noqa: E402
 from app.pricing import PRICES, cost_usd, usage_counts  # noqa: E402
 from app.telegram import handler as tg  # noqa: E402
+from app import clock  # noqa: E402
+from app.agent.context import issue_reminder_line, mentions_issue  # noqa: E402
+from app.agent.stats import note_timing  # noqa: E402
+
+_REAL_NOW_LOCAL = clock.now_local
 from app.telegram import replies as tg_replies  # noqa: E402
 
 # Every tool call in the current message, so checks can see what was refused
@@ -190,6 +195,8 @@ def send(ctx: Ctx, message: str) -> None:
     if onboarded:
         # What the context block tells the model about asking for a check-in
         print(f"    [context] {checkin_request_line(ctx.user_id, date.today(), ctx.db)}")
+        for issue in (i for i in user.issues if i.status == "active"):
+            print(f"    [context] {issue_reminder_line(issue, ctx.user_id, date.today(), ctx.db)}")
     before = len(_checkins(ctx))
     _TOOL_LOG.clear()
     _USAGE_LOG.clear()
@@ -293,6 +300,10 @@ def _shift_back(ctx: Ctx, n: int) -> None:
         note.created_at -= d
         if note.follow_up_on:
             note.follow_up_on -= d
+        if note.starts_on:
+            note.starts_on -= d
+        if note.ends_on:
+            note.ends_on -= d
     for m in u.milestones:
         m.reached_on -= d
     ctx.db.commit()
@@ -430,7 +441,8 @@ def one_question_at_most(ctx: Ctx) -> CheckResult:
 
 _PROMISE_RE = re.compile(
     r"\b(I'?ll|I will|I'?m going to|I can)\s+(\w+\s+){0,2}"
-    r"(check in|check back|message|text|ping|reach out|follow up|get back|be in touch|remind)\b", re.I)
+    r"(check in|check back|message|text|ping|reach out|follow up|get back|be in touch|remind)\b"
+    r"|\bI (check in|message you|text you|reach out)\b", re.I)
 
 
 def no_promise_to_message_first(ctx: Ctx) -> CheckResult:
@@ -451,7 +463,7 @@ COMMON_CHECKS = [
     ("no check-in saved before onboarding completes", no_checkin_during_onboarding),
     ("no reply repeats the same 6-word run", no_repeated_runs),
     ("no reply has more than one question mark", one_question_at_most),
-    ("no reply promises to message first", no_promise_to_message_first),
+    ("no reply promises to message first or says it checks in", no_promise_to_message_first),
 ]
 
 
@@ -835,6 +847,54 @@ def _lena_trainer_ack(ctx: Ctx) -> CheckResult:
     return ok, f"reply: {reply!r}"
 
 
+# Rohan: Sid's conversation of 6 Oct. A trip that started yesterday, gym planned
+# for tonight, then questions in the afternoon.
+_ROHAN_TRIP = "heading to Thailand in 2 days, back after 5 days there"
+_ROHAN_CHECKIN = "94.1, slept 7.5 hours, doing a gym workout today later at night"
+_ROHAN_WHAT = "What are you here for"
+
+
+def at_local_time(hour: int, minute: int) -> Callable[[Ctx], None]:
+    """Fixes the Singapore time the context block shows, for the rest of the persona."""
+    def step(ctx: Ctx) -> None:
+        fixed = datetime.combine(date.today(), datetime.min.time()).replace(hour=hour, minute=minute)
+        clock.now_local = lambda: fixed
+        print(f"\n[local time {hour:02d}:{minute:02d}]")
+    return step
+
+
+def _rohan_trip_dated(ctx: Ctx) -> CheckResult:
+    notes = [(n.text, n.starts_on, n.ends_on) for n in _notes(ctx)]
+    ok = any(start and end and (end - start).days >= 3 for _, start, end in notes)
+    return ok, f"notes (text, starts_on, ends_on): {notes}"
+
+
+def _rohan_no_still_going(ctx: Ctx) -> CheckResult:
+    """The trip has started: no reply asks whether they're still going."""
+    pat = re.compile(r"\bstill (off|going|heading|on for|planning)\b|\bare you (still )?(off|going|heading) to\b",
+                     re.I)
+    bad = [(s.message, q) for s in ctx.sent for q in _questions(s.reply) if pat.search(q)]
+    return not bad, f"asks: {bad}"
+
+
+def _rohan_no_gym_assumed(ctx: Ctx) -> CheckResult:
+    """At 15:15 the gym session planned for tonight hasn't happened."""
+    pat = re.compile(r"\bhow('d| did| was| were)\s+(the |your |that |tonight'?s |today'?s )?"
+                     r"(gym|session|workout|training|lift)\w*\b([^?]*\b(go|went|feel|felt|turn out))?", re.I)
+    bad = [(s.message, q) for s in ctx.sent if s.message != _ROHAN_TRIP
+           for q in _questions(s.reply) if pat.search(q)]
+    return not bad, f"asks: {bad}"
+
+
+def _rohan_back_once(ctx: Ctx) -> CheckResult:
+    """The back reminder at most once on the check-in day: his later messages
+    don't mention an exercise or pain."""
+    issue = next((i.what for i in _user(ctx).issues if i.status == "active"), "")
+    day = [s for s in ctx.sent if s.message in (_ROHAN_CHECKIN, _ROHAN_WHAT)]
+    hits = [s.message for s in day if mentions_issue(s.reply, issue)]
+    return len(hits) <= 1, f"replies mentioning the back: {hits}"
+
+
 PERSONAS = [
     Persona(
         name="priya",
@@ -1026,6 +1086,28 @@ PERSONAS = [
         ],
     ),
     Persona(
+        name="rohan",
+        summary="Trip already started, gym planned for tonight, asked about at 3pm",
+        steps=[
+            "hi", "Rohan", "31", "male", "95", "lose fat", "best shape of my life",
+            "lower left back strain from an RDL a few months back, mostly better", "no",
+            "95.0kg, slept 8 hours, Muay Thai bag work today",
+            _ROHAN_TRIP,
+            advance_days(3),
+            at_local_time(15, 15),
+            _ROHAN_CHECKIN,
+            _ROHAN_WHAT,
+        ],
+        checks=[
+            ("onboarding complete", onboarding_complete),
+            ("trip saved with start and end dates", _rohan_trip_dated),
+            ("no reply asks if he's still going on the trip", _rohan_no_still_going),
+            ("no reply asks how tonight's gym session went", _rohan_no_gym_assumed),
+            ("back reminder at most once that day", _rohan_back_once),
+            ("back strain saved once", one_active_issue),
+        ],
+    ),
+    Persona(
         name="sam",
         summary="Motivation under pressure: 4 low days, then wants to quit",
         steps=[
@@ -1210,6 +1292,62 @@ def _code_several_goals(db) -> CheckResult:
     if db.get(User, uid).profile.goal != "lose_fat":
         wrong.append("single goal refused")
     return not wrong, f"wrong: {wrong}"
+
+
+def _code_note_dates(db) -> CheckResult:
+    """remember stores a trip's dates; status comes from code; bad dates are refused."""
+    uid = _onboarded_user(db)
+    t = date.today()
+    ok_result = dispatch("remember", {"text": "Trip to Thailand", "starts_on": str(t - timedelta(days=1)),
+                                      "ends_on": str(t + timedelta(days=4))}, uid, 0, db)
+    backwards = dispatch("remember", {"text": "Wedding weekend", "starts_on": str(t + timedelta(days=5)),
+                                      "ends_on": str(t + timedelta(days=3))}, uid, 0, db)
+    cases = {
+        "happening now, ends in 4 days": (t - timedelta(days=1), t + timedelta(days=4)),
+        "upcoming, starts in 2 days": (t + timedelta(days=2), t + timedelta(days=6)),
+        "ended 3 days ago": (t - timedelta(days=8), t - timedelta(days=3)),
+        "upcoming, starts tomorrow": (t + timedelta(days=1), None),
+        "today": (t, t),
+    }
+    wrong = [want for want, (a, b) in cases.items() if note_timing(a, b, t) != want]
+    ok = (ok_result.get("timing") == "happening now, ends in 4 days" and not backwards["saved"]
+          and not wrong)
+    return ok, f"saved={ok_result}, backwards refused={not backwards['saved']}, wrong={wrong}"
+
+
+def _code_issue_reminder(db) -> CheckResult:
+    """The reminder line flips once a reply today names the body part, and only then."""
+    uid = _onboarded_user(db)
+    db.add(Issue(user_id=uid, what="lower left back strain from RDLs"))
+    db.commit()
+    issue = db.get(User, uid).issues[0]
+    before = issue_reminder_line(issue, uid, date.today(), db)
+    db.add(RawMessage(user_id=uid, body="94.1", reply_text="Four days off and you're back at it."))
+    db.commit()
+    after_back_at_it = issue_reminder_line(issue, uid, date.today(), db)
+    db.add(RawMessage(user_id=uid, body="gym tonight", reply_text="Go easy on that lower back tonight."))
+    db.commit()
+    after = issue_reminder_line(issue, uid, date.today(), db)
+    ok = (before.endswith("given today: no.") and after_back_at_it == before
+          and after.startswith("Back reminder already given today"))
+    return ok, f"before={before!r}, after={after!r}"
+
+
+def _code_local_time(db) -> CheckResult:
+    """The context block shows Singapore time and part of day from clock.now_local."""
+    from app.agent.context import build_system_prompt
+    uid = _onboarded_user(db)
+    fixed = datetime.combine(date.today(), datetime.min.time()).replace(hour=15, minute=19)
+    clock.now_local = lambda: fixed
+    try:
+        block = build_system_prompt(db.get(User, uid), db)[1]["text"]
+    finally:
+        clock.now_local = _REAL_NOW_LOCAL
+    parts = [clock.part_of_day(h) for h in (6, 12, 18, 23, 3)]
+    ok = ("Local time: 15:19 Singapore, afternoon." in block
+          and parts == ["morning", "afternoon", "evening", "night", "night"])
+    line = next((l for l in block.splitlines() if l.startswith("Local time")), None)
+    return ok, f"line={line!r}, parts={parts}"
 
 
 def _code_profile_locked(db) -> CheckResult:
@@ -1499,6 +1637,9 @@ CODE_CHECKS = [
     ("an active issue is saved once, however it's worded", _code_issue_once),
     ("a described trainer or coach is saved; a plain no isn't", _code_trainer_described),
     ("several goals at once save none", _code_several_goals),
+    ("note dates: status computed in code, bad dates refused", _code_note_dates),
+    ("injury reminder line flips once a reply names the body part", _code_issue_reminder),
+    ("context shows Singapore local time and part of day", _code_local_time),
     ("telegram: allowlist turns strangers away and stores nothing", _code_tg_allowlist),
     ("telegram: wrong webhook secret gets 401", _code_tg_webhook_secret),
     ("telegram: duplicate update_id handled once", _code_tg_duplicate),
@@ -1556,6 +1697,7 @@ def run_persona(p: Persona) -> list[tuple[str, str, bool, str]]:
         print(f"\n!!! {error}")
     finally:
         db.close()
+        clock.now_local = _REAL_NOW_LOCAL
 
     SENT_BY_PERSONA[p.name] = ctx.sent
     rows = []

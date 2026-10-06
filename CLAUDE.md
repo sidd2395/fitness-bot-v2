@@ -29,6 +29,8 @@ A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
 - `app/main.py`: FastAPI. `POST /telegram/webhook` (secret header or 401,
   handled in a background task), `GET /health`, migrations on startup.
 - `app/logs.py`: JSON logs in prod. Never log message text, replies, names or keys.
+- `app/clock.py`: Singapore local time (`now_local`, which tests replace), part
+  of day, and midnight for the daily cap.
 - `app/db/`: models (incl. `notes`, `milestones`), session (`database_url()`
   converts Railway's postgres://), `delete_user`, `migrate.upgrade_head`.
 - `alembic/versions/`: migrations. The test DB is built from these.
@@ -79,7 +81,11 @@ Phase 1 is built and passed its last full run, 187/187. Since then the
 short-sleep run is computed in code (sam 22/22), and the onboarding fixes:
 an active issue is saved once, a described trainer or coach is saved and
 acknowledged, several goals at once save none, no promises to message first
-(new persona lena; onboarding personas and tom pass).
+(new persona lena; onboarding personas and tom pass). Then the 6 Oct fixes:
+local time and part of day in the context block, once-a-day injury
+reminders tracked in code, note start/end dates with status computed in
+code (migration 009), and "they check in with you" in coach.md (new persona
+rohan; rohan, tom, lena, maya, nadia pass).
 
 Phase 2, part 1 is built and passes the code-level checks, but hasn't been
 tried on a phone yet: Telegram layer, polling, webhook, allowlist, consent,

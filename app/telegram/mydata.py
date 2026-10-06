@@ -41,6 +41,16 @@ def _checkin_line(c: Checkin) -> str:
     return f"- {c.date} {c.entry_type}: {', '.join(bits) or 'no numbers'}"
 
 
+def _note_dates(n) -> str:
+    bits = []
+    if n.starts_on or n.ends_on:
+        start, end = n.starts_on or n.ends_on, n.ends_on or n.starts_on
+        bits.append(str(start) if start == end else f"{start} to {end}")
+    if n.follow_up_on:
+        bits.append(f"follow up {n.follow_up_on}")
+    return f" ({', '.join(bits)})" if bits else ""
+
+
 def format_mydata(user: Optional[User], db: Session) -> str:
     if user is None:
         return "I don't hold anything about you."
@@ -82,8 +92,7 @@ def format_mydata(user: Optional[User], db: Session) -> str:
 
     notes = [n for n in user.notes if not n.resolved]
     lines += ["", "Notes I keep about you"]
-    lines += [f"- {n.text}" + (f" (follow up {n.follow_up_on})" if n.follow_up_on else "")
-              for n in sorted(notes, key=lambda n: n.created_at)] or ["none"]
+    lines += [f"- {n.text}" + _note_dates(n) for n in sorted(notes, key=lambda n: n.created_at)] or ["none"]
     resolved = len(user.notes) - len(notes)
     if resolved:
         lines.append(f"Plus {resolved} older note{'s' if resolved != 1 else ''} already dealt with.")

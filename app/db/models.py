@@ -79,6 +79,8 @@ class Note(Base):
     user_id      = Column(Integer, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False, index=True)
     text         = Column(String(200), nullable=False)
     follow_up_on = Column(Date,     nullable=True)
+    starts_on    = Column(Date,     nullable=True)   # when the event or trip starts, if it has dates
+    ends_on      = Column(Date,     nullable=True)   # last day; same as starts_on for a one-day event
     resolved     = Column(Boolean,  default=False, nullable=False)
     created_at   = Column(DateTime, default=datetime.utcnow, nullable=False)
 
