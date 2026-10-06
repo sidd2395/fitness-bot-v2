@@ -1637,6 +1637,21 @@ def _code_food_note(db) -> CheckResult:
     return ok, f"food_note={c.food_note if c else None!r}, calories={c.calories if c else None}, result={result}"
 
 
+def _code_weight_words(db) -> CheckResult:
+    """log_checkin's weight_change carries the phrase built in code, direction included."""
+    uid = _onboarded_user(db)
+    t = date.today()
+    db.add(Checkin(user_id=uid, date=t - timedelta(days=1), entry_type="morning", weight_kg=62.6,
+                   raw_message="62.6"))
+    m = RawMessage(user_id=uid, body="63.1 slept 7h")
+    db.add(m)
+    db.commit()
+    result = dispatch("log_checkin", {"is_checkin": True, "entry_type": "morning", "weight_kg": 63.1,
+                                      "sleep_hours": 7}, uid, m.id, db)
+    words = (result.get("weight_change") or {}).get("in_words")
+    return words == "up 0.5kg since yesterday's 62.6kg", f"in_words={words!r}"
+
+
 def _code_mydata_optional(db) -> CheckResult:
     """/mydata leaves out empty optional fields and explains when there are no targets."""
     from app.telegram.mydata import format_mydata
@@ -1943,6 +1958,7 @@ CODE_CHECKS = [
     ("forced check-in: targets skip it, only this message's data", _code_forced_checkin_scope),
     ("/mydata: no 'not set', and says when there are no targets", _code_mydata_optional),
     ("food in words saved as food_note, never as calories", _code_food_note),
+    ("weight change phrase built in code", _code_weight_words),
     ("telegram: allowlist turns strangers away and stores nothing", _code_tg_allowlist),
     ("telegram: wrong webhook secret gets 401", _code_tg_webhook_secret),
     ("telegram: duplicate update_id handled once", _code_tg_duplicate),

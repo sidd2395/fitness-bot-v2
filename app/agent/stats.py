@@ -106,7 +106,17 @@ def weight_change_since_last(user_id: int, db: Session, on: date) -> Optional[di
         "change_since_last_kg": change,
         "direction": "up" if change > 0 else "down" if change < 0 else "same",
         "days_between": (on - prev).days,
+        "in_words": weight_change_words(change, by_day[prev], (on - prev).days),
     }
+
+
+def weight_change_words(change: float, previous: float, days: int) -> str:
+    """The change as a phrase the coach uses as given, so the direction is never
+    its own: "up 0.5kg since yesterday's 62.6kg", "down 0.9kg since 95.0kg 4 days ago"."""
+    since = f"yesterday's {previous:.1f}kg" if days == 1 else f"{previous:.1f}kg {days} days ago"
+    if change == 0:
+        return f"the same as {since}"
+    return f"{'up' if change > 0 else 'down'} {abs(change):.1f}kg since {since}"
 
 
 def short_sleep_run(checkins, on: date) -> Optional[dict]:

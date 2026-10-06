@@ -302,16 +302,12 @@ def _context_block(user: User, db: Session) -> str:
                      f"{s['days_since_last_checkin']} days ago.")
     last = weight_change_since_last(user.user_id, db, today)
     if last:
-        sign = "+" if last["change_since_last_kg"] > 0 else ""
-        lines.append(
-            f"Weight today {last['weight_kg']}kg: {sign}{last['change_since_last_kg']}kg "
-            f"({last['direction']}) since {last['previous_weight_kg']}kg "
-            f"{last['days_between']} day(s) before."
-        )
+        lines.append(f"Weight today {last['weight_kg']:.1f}kg: {last['in_words']}. "
+                     "Use these words as given.")
     if s["weight_change_7d"] is not None:
         delta = s["weight_change_7d"]
-        sign = "+" if delta > 0 else ""
-        lines.append(f"Weight: {sign}{delta}kg over 7 days.")
+        words = "no change" if delta == 0 else f"{'up' if delta > 0 else 'down'} {abs(delta):.1f}kg"
+        lines.append(f"Weight over 7 days: {words}.")
     # The only sleep counts the coach may use
     sleep_text = describe_sleep_run(s["sleep_run"])
     if sleep_text:
