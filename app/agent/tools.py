@@ -351,6 +351,37 @@ def _last_reply_asked(user_id: int, raw_msg_id: int, db: Session) -> bool:
     return bool(prev and "?" in prev.reply_text)
 
 
+_TEXT_STOP = {"the", "and", "today", "with", "did", "had", "was", "for", "this", "that", "too", "day",
+              "session", "some", "bit", "got", "went", "then", "later", "earlier", "plus"}
+
+
+def _shares_word(value: str, message: str) -> bool:
+    """At least half the value's words are in the message: "legs" from "legs
+    today" passes, "Muay Thai (with Dan earlier)" from a message naming Dan doesn't."""
+    words = set(re.findall(r"[a-z]{3,}", value.lower())) - _TEXT_STOP
+    if not words:
+        return True
+    found = sum(1 for w in words if re.search(rf"\b{re.escape(w)}", message, re.I))
+    return found * 2 >= len(words)
+
+
+def only_from_message(inp: dict, message: str) -> tuple[dict, list]:
+    """For a check-in the safety net forced: keep only values found in this
+    message, so nothing said earlier is logged again under it. Numbers must
+    appear in it; training and food text must be mostly its words. Energy is
+    read from words like "tired", so it stays."""
+    kept, dropped = dict(inp), []
+    for field in ("weight_kg", "sleep_hours", "calories", "protein_g", "water_l"):
+        if kept.get(field) is not None and not _says_number(message, kept[field]):
+            dropped.append(field)
+            del kept[field]
+    for field in ("training", "food_note"):
+        if kept.get(field) and not _shares_word(str(kept[field]), message):
+            dropped.append(field)
+            del kept[field]
+    return kept, dropped
+
+
 def _log_checkin(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict:
     user = db.get(User, user_id)
     if not _onboarded(user):

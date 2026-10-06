@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
 from app.db.models import RawMessage, User
-from app.agent.tools import ONBOARDING_STEPS, TOOL_SCHEMAS, dispatch
+from app.agent.tools import ONBOARDING_STEPS, TOOL_SCHEMAS, dispatch, only_from_message
 from app.agent.context import build_system_prompt, build_trainer_ack_prompt
 from app.pricing import cost_usd, usage_counts
 
@@ -225,7 +225,14 @@ def _coach(user: User, message: str, messages: list, raw_msg: RawMessage, db: Se
                 continue
             # is_correction is honoured only if the message itself says it's a
             # correction or a yes (checked in log_checkin), forced call or not
-            result = dispatch(block.name, block.input, user_id, raw_msg.id, db)
+            inp, dropped = block.input, []
+            if force_checkin and block.name == "log_checkin":
+                # Forced on this message, so it logs only what this message says
+                inp, dropped = only_from_message(block.input, message)
+            result = dispatch(block.name, inp, user_id, raw_msg.id, db)
+            if dropped:
+                result = {**result, "not_in_this_message": dropped}
+                _log("forced_fields_dropped", user_id, ",".join(dropped))
             tool_results.append(_tool_result(block.id, result))
             tool_calls_used += 1
             saved_this_turn = saved_this_turn or bool(result.get("saved"))
@@ -310,8 +317,17 @@ def _coach(user: User, message: str, messages: list, raw_msg: RawMessage, db: Se
     return reply
 
 
+# "Dan wants me on 2200 cal", "set my calories to 900": a target, not a check-in
+_TARGET_STATEMENT = re.compile(
+    r"\b(targets?|wants? me (on|at|to)|ha(s|ve) me (on|at)|put me on|aim(ing)? for|set my|"
+    r"should (eat|have|be on)|supposed to (eat|have))\b", re.I)
+_TARGET_UNITS = re.compile(r"\b(cals?|kcal|calories|protein|water|litres?|liters?)\b", re.I)
+
+
 def _looks_like_checkin(message: str) -> bool:
     # A number and not a question: "weight 820", "82.4 slept 5hrs"
+    if _TARGET_STATEMENT.search(message) and _TARGET_UNITS.search(message):
+        return False
     return any(c.isdigit() for c in message) and "?" not in message
 
 

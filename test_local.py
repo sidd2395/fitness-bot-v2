@@ -991,6 +991,14 @@ def _dev_profile(ctx: Ctx) -> CheckResult:
     return ok, f"trainer={u.trainer_name!r}, disciplines={p.disciplines if p else None!r}"
 
 
+def _dev_targets_no_checkin(ctx: Ctx) -> CheckResult:
+    """The targets message isn't a check-in: no forced log, nothing saved from it."""
+    s = next((x for x in ctx.sent if x.message == _DEV_TARGETS), None)
+    calls = [(n, i) for n, i, _ in (s.tools if s else []) if n == "log_checkin"]
+    return bool(s) and not s.new_checkin and not any(i.get("is_checkin") for _, i in calls), \
+        f"log_checkin calls: {calls}, new check-in: {s.new_checkin if s else None}"
+
+
 def _dev_targets(ctx: Ctx) -> CheckResult:
     p = _user(ctx).profile
     got = (p.calorie_target, p.protein_target_g, p.targets_set_by) if p else None
@@ -1276,6 +1284,7 @@ PERSONAS = [
             ("onboarding complete", onboarding_complete),
             ("trainer Dan and Muay Thai saved from chat", _dev_profile),
             ("targets get one confirming question first", _dev_asked_first),
+            ("targets message logs no check-in", _dev_targets_no_checkin),
             ("after yes: 2200 cal, 160g protein, set by coach", _dev_targets),
             ("900 cal refused, 2200 kept, nothing offered", _dev_low_refused),
             ("/mydata shows coach, sport and targets", _dev_mydata),
@@ -1589,6 +1598,27 @@ def _code_profile_from_chat(db) -> CheckResult:
     return not wrong, f"wrong: {wrong}"
 
 
+def _code_forced_checkin_scope(db) -> CheckResult:
+    """Target statements don't trip the safety net, and a forced check-in keeps
+    only what the current message says."""
+    from app.agent.loop import _looks_like_checkin
+    from app.agent.tools import only_from_message
+    wrong = [m for m in ("Dan wants me on 2200 cal and 160g protein", "my PT has me on 2000 cal",
+                         "set my calories to 900") if _looks_like_checkin(m)]
+    wrong += [m for m in ("82.4 slept 5hrs", "weight 820", "95kg 6h, heavy deadlifts today")
+              if not _looks_like_checkin(m)]
+    kept, dropped = only_from_message(
+        {"is_checkin": True, "training": "Muay Thai (in addition to squats with Dan earlier)",
+         "weight_kg": 80.4}, "Dan wants me on 2200 cal and 160g protein")
+    if "training" in kept or "weight_kg" in kept:
+        wrong.append(f"carried over: {kept}")
+    kept, _ = only_from_message({"training": "legs", "weight_kg": 180, "sleep_hours": 5, "energy": 2},
+                                "180 lbs, slept 5h, legs, tired")
+    if set(kept) != {"training", "weight_kg", "sleep_hours", "energy"}:
+        wrong.append(f"dropped this message's data: {kept}")
+    return not wrong, f"wrong: {wrong}"
+
+
 def _code_profile_locked(db) -> CheckResult:
     """After onboarding, saved profile values change only when the user's own
     message says so; a model-supplied confirmation flag counts for nothing."""
@@ -1882,6 +1912,7 @@ CODE_CHECKS = [
     ("context shows Singapore local time and part of day", _code_local_time),
     ("get_history merges a day, caps at 60; /summary escapes HTML", _code_history),
     ("trainer, sports and confirmed targets update from chat", _code_profile_from_chat),
+    ("forced check-in: targets skip it, only this message's data", _code_forced_checkin_scope),
     ("telegram: allowlist turns strangers away and stores nothing", _code_tg_allowlist),
     ("telegram: wrong webhook secret gets 401", _code_tg_webhook_secret),
     ("telegram: duplicate update_id handled once", _code_tg_duplicate),
