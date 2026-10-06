@@ -17,6 +17,7 @@ Other names they mention (a coach, a partner) are not replaced. Written to
 transcript_anon_<n>.txt, numbered so nothing in the file points back to the user.
 """
 import argparse
+import os
 import re
 import sys
 from datetime import timedelta, timezone
@@ -28,6 +29,9 @@ sys.path.insert(0, str(ROOT))
 from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv(ROOT / ".env")
+# Railway's private database address only resolves inside Railway (DEPLOY.md)
+if os.environ.get("DATABASE_PUBLIC_URL"):
+    os.environ["DATABASE_URL"] = os.environ["DATABASE_PUBLIC_URL"]
 
 from app.db.models import Checkin, Issue, Note, RawMessage, User  # noqa: E402
 from app.db.session import SessionLocal  # noqa: E402
