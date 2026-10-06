@@ -7,6 +7,7 @@ CONSENT_NOTICE = (
     "• I store your profile, check-ins and notes so I can coach you.\n"
     "• Your messages are processed by Anthropic's AI.\n"
     "• /mydata shows everything I hold about you, and /delete erases it.\n"
+    "• We may review anonymised conversations to improve Coach Bob.\n"
     "• You need to be 18 or over.\n\n"
     "Tap \"I agree\" to start."
 )
