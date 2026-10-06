@@ -14,6 +14,7 @@ from app.db.models import RawMessage, User
 from app.agent.tools import (ONBOARDING_STEPS, TOOL_SCHEMAS, add_sports_from_message, dispatch,
                              only_from_message)
 from app.agent.context import build_system_prompt, build_trainer_ack_prompt
+from app.capabilities import all_set_text
 from app.pricing import cost_usd, usage_counts
 
 load_dotenv()
@@ -37,13 +38,7 @@ BLOCKED_REPLY = (
     "Sorry, I can only coach people aged 18 and over. A parent, school coach or "
     "doctor is a good person to talk to about training."
 )
-ONBOARDED_REPLY = (
-    "You're all set. Send your first check-in whenever you're ready, numbers or words, "
-    "for example:\n"
-    "• 82kg, slept 7h, legs today\n"
-    "• slept badly, skipped gym, ate light\n"
-    "Type /help anytime."
-)
+ONBOARDED_REPLY = all_set_text()   # built from app/capabilities.py
 # When no reply text can be produced at all: one wording if this turn saved
 # something, another if it saved nothing
 EMPTY_REPLY_SAVED = (

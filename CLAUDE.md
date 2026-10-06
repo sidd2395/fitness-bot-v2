@@ -18,7 +18,12 @@ A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
   onboarding rules) is cached. The per-turn block comes after it.
 - `app/agent/stats.py`: numbers computed in code for the context block, and
   milestones (reached in code, stored in `milestones` so each fires once).
+  Also the 7-day trend, "weight steady for 3 weeks", and rationed tips (one
+  every 3 days, each kind once), stored in `nudges` as they're handed over.
 - `app/agent/prompts/coach.md`: the coach's voice.
+- `app/capabilities.py`: what Coach Bob can and can't do, with examples. /help,
+  the "all set" message, the Telegram command menu and the prompt's "What you
+  can help with" are built from it; change offers there only.
 - `app/pricing.py`: price per million tokens for each model (input, output,
   cache read, cache write). Every model call logs its token counts
   (`event=usage`); `test_local.py` ends with a cost summary from these.
@@ -61,7 +66,7 @@ A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
 
 - Never commit `.env` or any database file.
 - `coach.md` is the only source for the coach's voice. Don't put tone or
-  persona text in code.
+  persona text in code. `capabilities.py` is the only list of what he offers.
 - Safety rules live in code, not the prompt: the under-18 block (fixed reply, no
   model call, data deleted, nothing stored), check-in range checks, and the
   forced `log_checkin` safety net. The prompt can explain them, never replace them.

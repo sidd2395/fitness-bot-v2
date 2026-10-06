@@ -2,7 +2,7 @@
 from datetime import date, timedelta
 from typing import Optional
 from sqlalchemy.orm import Session
-from app.db.models import Checkin, Milestone, User
+from app.db.models import Checkin, Milestone, Note, Nudge, User
 
 
 def compute(user_id: int, db: Session, today: date) -> dict:
@@ -33,18 +33,6 @@ def compute(user_id: int, db: Session, today: date) -> dict:
     past = sorted((d for d in dates if d < today), reverse=True)
     days_since_last = (today - past[0]).days if past else None
 
-    # Weight change over 7 days
-    weight_change_7d = None
-    weights = sorted(
-        [(c.date, c.weight_kg) for c in checkins if c.weight_kg is not None],
-        key=lambda x: x[0],
-    )
-    if len(weights) >= 2:
-        latest_w = weights[-1][1]
-        week_ago = today - timedelta(days=7)
-        older = [w for dt, w in weights if dt <= week_ago]
-        if older:
-            weight_change_7d = round(latest_w - older[-1], 2)
 
     run = short_sleep_run(checkins, today)
     short_sleep = run["nights_under_6h"] if run else 0
@@ -74,7 +62,6 @@ def compute(user_id: int, db: Session, today: date) -> dict:
         "days_in_a_row": days_in_a_row,
         "days_since_joined": days_since_joined,
         "days_since_last_checkin": days_since_last,
-        "weight_change_7d": weight_change_7d,
         "short_sleep_streak": short_sleep,
         "sleep_run": run,
         "logged_today": logged_today,
@@ -313,3 +300,135 @@ def weight_change_over(history: list[dict]) -> Optional[dict]:
     return {"from_kg": first["weight_kg"], "from_date": first["date"],
             "to_kg": last["weight_kg"], "to_date": last["date"],
             "change_kg": round(last["weight_kg"] - first["weight_kg"], 1)}
+
+
+# --------------------------------------------------------------------------- #
+# 7-day trend and steady weight. A day's weight is its latest weigh-in; a      #
+# 7-day average needs at least 3 of them.                                       #
+# --------------------------------------------------------------------------- #
+
+TREND_MIN_WEIGH_INS = 3
+STEADY_KG = 0.3
+_GOAL_DIRECTION = {"lose_fat": -1, "build_muscle": 1}
+
+
+def seven_day_average(user_id: int, db: Session, end: date) -> Optional[float]:
+    """Average of the daily weights in the 7 days ending on `end`, or None with
+    fewer than 3 weigh-ins."""
+    rows = (db.query(Checkin.date, Checkin.weight_kg)
+            .filter(Checkin.user_id == user_id, Checkin.weight_kg.isnot(None),
+                    Checkin.date >= end - timedelta(days=6), Checkin.date <= end)
+            .order_by(Checkin.date, Checkin.created_at, Checkin.checkin_id)
+            .all())
+    by_day = {d: w for d, w in rows}
+    if len(by_day) < TREND_MIN_WEIGH_INS:
+        return None
+    return round(sum(by_day.values()) / len(by_day), 1)
+
+
+def weight_trend(user_id: int, db: Session, today: date, goal: Optional[str]) -> Optional[dict]:
+    """This week's 7-day average against the week before, as a phrase to use as
+    given, and whether it's moving the way their goal wants."""
+    now = seven_day_average(user_id, db, today)
+    if now is None:
+        return None
+    before = seven_day_average(user_id, db, today - timedelta(days=7))
+    trend = {"average_kg": now, "previous_average_kg": before, "change_kg": None, "right_way": None}
+    if before is None:
+        trend["in_words"] = (f"7-day average {now:.1f}kg (too few weigh-ins the week before "
+                             "to compare)")
+        return trend
+    change = round(now - before, 1)
+    trend["change_kg"] = change
+    if change == 0:
+        trend["in_words"] = f"7-day average {now:.1f}kg, the same as the week before"
+    else:
+        trend["in_words"] = (f"7-day average {now:.1f}kg, {'up' if change > 0 else 'down'} "
+                             f"{abs(change):.1f}kg on the week before")
+    direction = _GOAL_DIRECTION.get(goal)
+    if direction and change:
+        trend["right_way"] = (change > 0) == (direction > 0)
+    return trend
+
+
+def steady_weight(user_id: int, db: Session, today: date, goal: Optional[str]) -> Optional[str]:
+    """For lose_fat or build_muscle: the 7-day average has stayed within 0.3kg
+    over 3 consecutive weeks, each with enough weigh-ins. The averages, oldest
+    first, as a phrase; None otherwise."""
+    if goal not in _GOAL_DIRECTION:
+        return None
+    averages = [seven_day_average(user_id, db, today - timedelta(days=7 * k)) for k in (2, 1, 0)]
+    if any(a is None for a in averages) or max(averages) - min(averages) >= STEADY_KG:
+        return None
+    return ("Weight steady for 3 weeks: 7-day averages "
+            + ", ".join(f"{a:.1f}kg" for a in averages) + " (oldest first)")
+
+
+# --------------------------------------------------------------------------- #
+# Tips: at most one feature tip every 3 days, each kind once, only when it's    #
+# relevant. Recorded when handed to the model, like milestones, so a tip the    #
+# model doesn't use still counts and can never nag.                            #
+# --------------------------------------------------------------------------- #
+
+TIP_GAP_DAYS = 3
+SUMMARY_TIP_CHECKINS = 7
+EVENT_TIP_WINDOW_DAYS = 14
+
+
+def claim_tip(user_id: int, db: Session, today: date) -> Optional[str]:
+    user = db.get(User, user_id)
+    tips = [n for n in user.nudges if n.kind.startswith("tip:")]
+    if any((today - n.shown_on).days < TIP_GAP_DAYS for n in tips):
+        return None
+    shown = {n.kind for n in tips}
+
+    candidates = []
+    upcoming = (db.query(Note)
+                .filter(Note.user_id == user_id, Note.resolved.is_(False), Note.starts_on.isnot(None),
+                        Note.starts_on > today,
+                        Note.starts_on <= today + timedelta(days=EVENT_TIP_WINDOW_DAYS))
+                .order_by(Note.starts_on)
+                .all())
+    for note in upcoming:
+        timing = note_timing(note.starts_on, note.ends_on, today)
+        candidates.append((f"tip:event:{note.note_id}",
+                           f'"{note.text}" is {timing}. If it fits this reply, offer a short '
+                           "before-and-after plan for it."))
+    checkins = db.query(Checkin.checkin_id).filter(Checkin.user_id == user_id).count()
+    if checkins >= SUMMARY_TIP_CHECKINS and user.summary_used_at is None:
+        candidates.append(("tip:summary",
+                           f"They've logged {checkins} check-ins and never used /summary. If it "
+                           "fits, mention that /summary gives a list they can forward to a trainer."))
+
+    for kind, text in candidates:
+        if kind not in shown:
+            db.add(Nudge(user_id=user_id, kind=kind, shown_on=today))
+            db.commit()
+            return text
+    return None
+
+
+def claim_steady_weight(user_id: int, db: Session, today: date, goal: Optional[str]) -> Optional[str]:
+    """The steady-weight flag, handed over at most once every 3 weeks."""
+    flag = steady_weight(user_id, db, today, goal)
+    if flag is None:
+        return None
+    user = db.get(User, user_id)
+    if any(n.kind == "stuck_weight" and (today - n.shown_on).days < 21 for n in user.nudges):
+        return None
+    db.add(Nudge(user_id=user_id, kind="stuck_weight", shown_on=today))
+    db.commit()
+    return flag
+
+
+def lead_with_trend(daily: Optional[dict], trend: Optional[dict], goal: Optional[str]) -> Optional[str]:
+    """When today's weight moved against their goal but the 7-day trend is going
+    the right way, the instruction to lead with the trend."""
+    direction = _GOAL_DIRECTION.get(goal)
+    if not (daily and trend and direction and trend.get("right_way")):
+        return None
+    against = daily["direction"] == ("up" if direction < 0 else "down")
+    if not against:
+        return None
+    return (f"Today's weight is {daily['direction']} but the 7-day trend is going the right way: "
+            "lead with the trend, then today's number.")

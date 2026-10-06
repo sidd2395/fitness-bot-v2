@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.agent.loop import run
+from app.capabilities import COMMANDS
 from app.clock import day_start_utc
 from app.db import delete_user
 from app.db.models import RawMessage, TelegramUpdate, User
@@ -57,6 +58,17 @@ class RateLimiter:
 
 
 limiter = RateLimiter(MESSAGE_INTERVAL_S)
+
+
+def register_commands(api) -> None:
+    """Sets the Telegram command menu from app/capabilities.py. A failure is
+    logged, never fatal: the bot works without the menu."""
+    try:
+        api.set_commands(COMMANDS)
+        _log("commands_registered")
+    except Exception as e:
+        logger.warning("event=commands_failed", extra={"event": "commands_failed",
+                                                        "detail": type(e).__name__})
 
 
 def allowed_ids() -> set[str]:
@@ -186,6 +198,8 @@ def _on_command(text: str, chat_id: str, user: Optional[User], api, db: Session)
         else:
             for message in format_summary(user, db, days):
                 api.send_message(chat_id, message)
+            user.summary_used_at = datetime.utcnow()   # so the /summary tip isn't offered
+            db.commit()
     elif command == "/mydata":
         api.send_message(chat_id, format_mydata(user, db))
     elif command == "/delete":

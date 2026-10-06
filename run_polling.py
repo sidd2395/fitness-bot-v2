@@ -16,7 +16,7 @@ load_dotenv()
 from app.db.migrate import upgrade_head  # noqa: E402
 from app.logs import setup_logging  # noqa: E402
 from app.telegram.api import TelegramAPI, safe_message  # noqa: E402
-from app.telegram.handler import allowed_ids, handle_update  # noqa: E402
+from app.telegram.handler import allowed_ids, handle_update, register_commands  # noqa: E402
 
 logger = logging.getLogger("app.polling")
 
@@ -30,6 +30,7 @@ def main() -> None:
     upgrade_head()
     api = TelegramAPI()
     api.call("deleteWebhook")
+    register_commands(api)
     me = api.call("getMe")
     print(f"Polling as @{me['username']}. Ctrl+C to stop.")
 

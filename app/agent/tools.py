@@ -5,8 +5,8 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Checkin, Issue, Note, Profile, RawMessage, User
 from app.agent.stats import (HISTORY_MAX_DAYS, claim_milestone, compute as compute_stats,
-                             daily_history, describe_sleep_run, note_timing,
-                             weight_change_since_last)
+                             daily_history, describe_sleep_run, lead_with_trend, note_timing,
+                             weight_change_since_last, weight_trend)
 
 CALORIE_FLOOR = {"M": 1500, "F": 1200}
 
@@ -562,13 +562,21 @@ def _log_checkin(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict:
                                          "the reply, after any safety point.")
         else:
             result["milestone_today"] = f"{milestone}. Mention it once, briefly."
-    # Weight saved: the change since the previous weigh-in, computed here
+    # Weight saved: the change since the previous weigh-in and the 7-day trend,
+    # computed here
     if "weight_kg" in fields_saved:
         change = weight_change_since_last(user_id, db, target_date)
         if change:
             result["weight_change"] = change
         else:
             result["weight_change"] = "first weigh-in, no earlier weight to compare"
+        goal = user.profile.goal if user.profile else None
+        trend = weight_trend(user_id, db, target_date, goal)
+        if trend:
+            result["trend"] = trend["in_words"]
+            lead = lead_with_trend(change, trend, goal)
+            if lead:
+                result["lead_with_trend"] = lead
     # Sleep saved: the short-sleep run, counted here so the model never counts nights
     if "sleep_hours" in fields_saved:
         result["sleep_run"] = (describe_sleep_run(sleep_run)

@@ -14,7 +14,7 @@ load_dotenv()
 
 from app.db.migrate import upgrade_head  # noqa: E402
 from app.logs import setup_logging  # noqa: E402
-from app.telegram.handler import handle_update  # noqa: E402
+from app.telegram.handler import handle_update, register_commands  # noqa: E402
 
 _api = None
 
@@ -32,6 +32,7 @@ def telegram_api():
 async def lifespan(_app: FastAPI):
     setup_logging()
     upgrade_head()
+    register_commands(telegram_api())
     yield
 
 

@@ -25,6 +25,7 @@ class User(Base):
     onboarding_step  = Column(Integer, default=0, nullable=False)  # 0–8; 8 = complete
     # Under 18. Personal data is cleared; every message gets a fixed reply, no model call
     blocked          = Column(Boolean, default=False, nullable=False)
+    summary_used_at  = Column(DateTime, nullable=True)   # last /summary, so its tip isn't offered after
 
     # Deleting a user deletes everything they own (PDPA delete command)
     profile      = relationship("Profile",    uselist=False, back_populates="user",
@@ -36,6 +37,8 @@ class User(Base):
     notes        = relationship("Note",       back_populates="user",
                                 cascade="all, delete-orphan")
     milestones   = relationship("Milestone",  back_populates="user",
+                                cascade="all, delete-orphan")
+    nudges       = relationship("Nudge",      back_populates="user",
                                 cascade="all, delete-orphan")
     raw_messages = relationship("RawMessage", back_populates="user",
                                 foreign_keys="RawMessage.user_id",
@@ -99,6 +102,18 @@ class Milestone(Base):
     reached_on   = Column(Date,   nullable=False)
 
     user = relationship("User", back_populates="milestones")
+
+
+class Nudge(Base):
+    """A tip or one-off flag already handed to the model, so it never repeats or nags."""
+    __tablename__ = "nudges"
+
+    nudge_id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id  = Column(Integer, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False, index=True)
+    kind     = Column(String, nullable=False)   # "tip:summary", "tip:event:<note id>", "stuck_weight"
+    shown_on = Column(Date,   nullable=False)
+
+    user = relationship("User", back_populates="nudges")
 
 
 class Checkin(Base):

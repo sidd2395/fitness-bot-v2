@@ -122,6 +122,9 @@ def format_mydata(user: Optional[User], db: Session) -> str:
     lines += [f"- {_MILESTONES.get(m.kind, m.kind.replace('_', ' '))}, {m.reached_on}"
               for m in sorted(user.milestones, key=lambda m: m.reached_on)] or ["none"]
 
+    if user.nudges:
+        lines += ["", f"Tips and reminders already shown to you: {len(user.nudges)} (kept so they "
+                      "aren't repeated)"]
     messages = db.query(RawMessage).filter(RawMessage.user_id == user.user_id).count()
     lines += ["", f"I also keep your messages and my replies ({messages} so far), so I "
                   "remember what we talked about.", "", "/delete erases all of it."]

@@ -17,6 +17,7 @@ from dotenv import load_dotenv  # noqa: E402
 
 load_dotenv()
 
+from app.capabilities import COMMANDS  # noqa: E402
 from app.telegram.api import TelegramAPI  # noqa: E402
 
 WEBHOOK_PATH = "/telegram/webhook"
@@ -53,6 +54,8 @@ def main() -> None:
              allowed_updates=["message", "callback_query"],
              drop_pending_updates=args.drop_pending)
     print(f"Webhook set: {url}")
+    api.set_commands(COMMANDS)
+    print("Command menu set: " + ", ".join(f"/{c}" for c in COMMANDS))
 
 
 if __name__ == "__main__":

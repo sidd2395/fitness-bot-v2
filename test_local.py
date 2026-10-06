@@ -915,10 +915,13 @@ def _rohan_back_once(ctx: Ctx) -> CheckResult:
 _KIM_FULL = "71.2kg, slept 7.5h, 5k easy run, energy 4"
 _KIM_TABLE = "can I get all my check-ins from the past 10 days in a table for my PT"
 _KIM_PUSH = "that doesn't say much about my sleep or training from last week, didn't I send that?"
+# Claims that the logged day's sleep or training is missing. "Nothing logged on
+# the other days" is true for kim, so generic "nothing logged" isn't one.
 _MISSING_CLAIM = re.compile(
-    r"\b(never (came|got|went) (through|in)|(wasn'?t|weren'?t|was not|not|never) (logged|sent|recorded)"
-    r"|didn'?t (come|get) through|not in the record|no (sleep|training) (came|was|got)"
-    r"|only (have |got )?(the |your )?weight|that'?s all i'?ve got|nothing (logged|recorded))\b", re.I)
+    r"\b((sleep|training|run)[^.]{0,40}(never (came|got|went) (through|in)|never (got )?(sent|logged|recorded)"
+    r"|(wasn'?t|weren'?t|was not|not|never) "
+    r"(logged|sent|recorded)|didn'?t (come|get) through|not in the record)"
+    r"|no (sleep|training) (came|was|got)|only (have |got )?(the |your )?weight|that'?s all i'?ve got)\b", re.I)
 
 
 def _kim_ask_day(ctx: Ctx) -> None:
@@ -1052,6 +1055,61 @@ def _dev_mydata(ctx: Ctx) -> CheckResult:
             "Protein: 160g", "Set by your coach"]
     missing = [w for w in want if w.lower() not in text.lower()]
     return not missing, f"missing: {missing}"
+
+
+# Mei: one-off ideas, Singapore food, an event, "what can you do", a decline.
+_MEI_WEDDING = "my cousin's wedding is on Saturday, help me plan around it"
+_MEI_WORKOUT = "hotel gym only today, give me a workout"
+_MEI_FOOD = "at a hawker centre, what's a good lunch"
+_MEI_WHAT = "what can you do?"
+_MEI_PROGRAMME = "write me a 12 week programme"
+
+
+def _mei_workout(ctx: Ctx) -> CheckResult:
+    """A single session for today that works around her knee, not a programme."""
+    reply = _reply(ctx, _MEI_WORKOUT)
+    programme = re.search(r"\bweek (\d|one|two)|\b\d+[- ]weeks?\b|\bprogramme\b", reply, re.I)
+    ok = bool(re.search(r"\bknee", reply, re.I)) and not programme and len(_words(reply)) >= 30
+    return ok, f"reply: {reply!r}"
+
+
+def _mei_food(ctx: Ctx) -> CheckResult:
+    """Real hawker dishes or swaps, and no calorie numbers."""
+    reply = _reply(ctx, _MEI_FOOD)
+    dishes = re.findall(r"\b(chicken rice|yong tau foo|fish soup|sliced fish|economy rice|cai fan|"
+                        r"mixed rice|thunder tea|satay|wanton|laksa|nasi|bee hoon|ban mian|chapati|"
+                        r"popiah|soup|kosong|siew dai|rice|noodles?|vegetables?)\b", reply, re.I)
+    numbers = re.findall(r"\d+\s*(kcal|cals?|calories)\b", reply, re.I)
+    return bool(dishes) and not numbers, f"dishes={dishes}, calorie numbers={numbers}, reply: {reply!r}"
+
+
+def _mei_wedding(ctx: Ctx) -> CheckResult:
+    """A plan for the day and after, with no compensation."""
+    reply = _reply(ctx, _MEI_WEDDING)
+    compensate = re.findall(r"\b(make up for|eat less (the )?(next|tomorrow|after)|skip (a |the )?meals?|"
+                            r"burn (it )?off|earn (it|your)|cut back (the )?(next|after)|compensate)\b", reply, re.I)
+    return bool(reply) and not compensate, f"compensation={compensate}, reply: {reply!r}"
+
+
+def _mei_what(ctx: Ctx) -> CheckResult:
+    """'What can you do?' covers most groups from capabilities.py."""
+    reply = _reply(ctx, _MEI_WHAT)
+    groups = {
+        "log": r"\b(log|check[- ]?ins?)\b", "workout": r"\b(workout|session|training)\b",
+        "food": r"\b(eat|food|order|hawker|meal)\b", "event": r"\b(trip|event|wedding|holiday|travel)\b",
+        "progress": r"\b(trend|progress|/summary)\b", "trainer": r"\b(trainer|PT|coach)\b|/summary",
+        "data": r"/mydata|/delete|\byour data\b",
+    }
+    covered = [g for g, rx in groups.items() if re.search(rx, reply, re.I)]
+    return len(covered) >= 5, f"covered {covered}, reply: {reply!r}"
+
+
+def _mei_decline(ctx: Ctx) -> CheckResult:
+    """No programme, and the closest thing offered instead."""
+    reply = _reply(ctx, _MEI_PROGRAMME)
+    offer = re.search(r"\b(today|session|workout|one at a time|day by day|each day)\b", reply, re.I)
+    plan = re.search(r"\bweek (1|one)\b|\bweeks? 1[- ]", reply, re.I)
+    return bool(offer) and not plan, f"reply: {reply!r}"
 
 
 PERSONAS = [
@@ -1307,6 +1365,28 @@ PERSONAS = [
             ("after yes: 2200 cal, 160g protein, set by coach", _dev_targets),
             ("900 cal refused, 2200 kept, nothing offered", _dev_low_refused),
             ("/mydata shows coach, sport and targets", _dev_mydata),
+        ],
+    ),
+    Persona(
+        name="mei",
+        summary="One-off workout around a sore knee, hawker lunch, a wedding, what can you do",
+        steps=[
+            "hi", "Mei", "35", "female", "62", "lose fat", "feel stronger",
+            "sore left knee from running", "no",
+            "62.4 slept 7h, easy walk today",
+            _MEI_WEDDING,
+            _MEI_WORKOUT,
+            _MEI_FOOD,
+            _MEI_WHAT,
+            _MEI_PROGRAMME,
+        ],
+        checks=[
+            ("onboarding complete", onboarding_complete),
+            ("hotel workout for today works around the knee", _mei_workout),
+            ("hawker lunch: real options, no calorie numbers", _mei_food),
+            ("wedding plan with no compensation", _mei_wedding),
+            ("'what can you do?' covers the main groups", _mei_what),
+            ("programme declined, closest thing offered", _mei_decline),
         ],
     ),
     Persona(
@@ -1684,6 +1764,86 @@ def _code_sports(db) -> CheckResult:
     return ok, f"added={added}, again={again}, disciplines={d!r}, false hits={misses}, missed={hits}"
 
 
+def _weigh(db, uid: int, weights_by_days_ago: dict) -> None:
+    for days_ago, kg in weights_by_days_ago.items():
+        db.add(Checkin(user_id=uid, date=date.today() - timedelta(days=days_ago), entry_type="morning",
+                       weight_kg=kg, raw_message=str(kg)))
+    db.commit()
+
+
+def _code_trend(db) -> CheckResult:
+    """7-day average against the week before, as a phrase; lead with the trend when
+    today is up but the trend is down for a fat-loss goal; too few weigh-ins, none."""
+    from app.agent.stats import lead_with_trend, weight_trend
+    uid = _onboarded_user(db, goal="lose_fat")
+    _weigh(db, uid, {10: 81.0, 9: 81.2, 8: 80.8, 3: 80.4, 1: 80.0, 0: 80.5})
+    t = weight_trend(uid, db, date.today(), "lose_fat")
+    lead = lead_with_trend({"direction": "up"}, t, "lose_fat")
+    few = _onboarded_user(db)
+    _weigh(db, few, {1: 70.0, 0: 70.2})
+    none = weight_trend(few, db, date.today(), "lose_fat")
+    ok = (t and t["in_words"] == "7-day average 80.3kg, down 0.7kg on the week before"
+          and t["right_way"] is True and lead and "lead with the trend" in lead and none is None)
+    return ok, f"trend={t}, lead={lead!r}, two weigh-ins={none}"
+
+
+def _code_steady(db) -> CheckResult:
+    """Three weeks of 7-day averages within 0.3kg flags lose_fat once, never perform."""
+    from app.agent.stats import claim_steady_weight
+    uid = _onboarded_user(db, goal="lose_fat")
+    _weigh(db, uid, {d: 80.0 + (0.1 if d % 2 else 0) for d in range(21)})
+    first = claim_steady_weight(uid, db, date.today(), "lose_fat")
+    again = claim_steady_weight(uid, db, date.today(), "lose_fat")
+    other = _onboarded_user(db, goal="perform")
+    _weigh(db, other, {d: 80.0 for d in range(21)})
+    perform = claim_steady_weight(other, db, date.today(), "perform")
+    ok = bool(first and first.startswith("Weight steady for 3 weeks")) and again is None and perform is None
+    return ok, f"first={first!r}, again={again!r}, perform={perform!r}"
+
+
+def _code_tips(db) -> CheckResult:
+    """One tip at most every 3 days, each kind once: /summary after 7 check-ins,
+    a plan for an event coming up."""
+    from app.agent.stats import claim_tip
+    from app.db.models import Nudge
+    uid = _onboarded_user(db)
+    _weigh(db, uid, {d: 80.0 for d in range(7)})
+    t = date.today()
+    first = claim_tip(uid, db, t)
+    db.add(Note(user_id=uid, text="Cousin's wedding", starts_on=t + timedelta(days=4)))
+    db.commit()
+    same_day = claim_tip(uid, db, t)
+    two_days = claim_tip(uid, db, t + timedelta(days=2))
+    three_days = claim_tip(uid, db, t + timedelta(days=3))
+    later = claim_tip(uid, db, t + timedelta(days=9))
+    kinds = [n.kind for n in db.query(Nudge).filter(Nudge.user_id == uid).all()]
+    ok = (first and "/summary" in first and same_day is None and two_days is None
+          and three_days and "wedding" in three_days and later is None and len(kinds) == 2)
+    return ok, f"first={bool(first)}, same day={same_day}, +2={two_days}, +3={bool(three_days)}, +9={later}, kinds={kinds}"
+
+
+def _code_help_and_all_set(db) -> CheckResult:
+    """/help and the all-set message come from capabilities.py: 3 examples to try,
+    every command, every example; the command menu sends the same commands."""
+    from app import capabilities
+    from app.telegram.api import TelegramAPI
+    examples = [c.example for c in capabilities.CAN if c.group not in ("Sharing with your PT", "Your data")]
+    tries = [l for l in ONBOARDED_REPLY.splitlines() if l.startswith("• ")]
+    wrong = []
+    if tg_replies.HELP != capabilities.help_text():
+        wrong.append("HELP isn't help_text()")
+    wrong += [f"/help missing {e!r}" for e in examples if e not in tg_replies.HELP]
+    wrong += [f"/help missing /{c}" for c in capabilities.COMMANDS if c != "help" and f"/{c}" not in tg_replies.HELP]
+    if len(tries) != 3 or not ONBOARDED_REPLY.endswith("Type /help anytime."):
+        wrong.append(f"all set has {len(tries)} examples")
+    http = FakeHTTP(True)
+    TelegramAPI(token="1:x", http=http).set_commands(capabilities.COMMANDS)
+    sent = [c["command"] for c in http.requests[0][1]["commands"]]
+    if sent != ["help", "summary", "mydata", "delete"] or not http.requests[0][0].endswith("/setMyCommands"):
+        wrong.append(f"menu sent {sent}")
+    return not wrong, f"wrong: {wrong}"
+
+
 def _code_mydata_optional(db) -> CheckResult:
     """/mydata leaves out empty optional fields and explains when there are no targets."""
     from app.telegram.mydata import format_mydata
@@ -1992,6 +2152,10 @@ CODE_CHECKS = [
     ("food in words saved as food_note, never as calories", _code_food_note),
     ("weight change phrase built in code", _code_weight_words),
     ("sports named in a message are added in code", _code_sports),
+    ("7-day trend phrase, and lead with it when today is the wrong way", _code_trend),
+    ("weight steady for 3 weeks flagged once, only for weight goals", _code_steady),
+    ("tips: one every 3 days at most, each kind once", _code_tips),
+    ("/help, all-set and the command menu come from capabilities.py", _code_help_and_all_set),
     ("telegram: allowlist turns strangers away and stores nothing", _code_tg_allowlist),
     ("telegram: wrong webhook secret gets 401", _code_tg_webhook_secret),
     ("telegram: duplicate update_id handled once", _code_tg_duplicate),

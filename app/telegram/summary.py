@@ -7,7 +7,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from app.agent.stats import HISTORY_MAX_DAYS, daily_history, weight_change_over
+from app.agent.stats import HISTORY_MAX_DAYS, daily_history, seven_day_average, weight_change_over
 from app.db.models import User
 
 DEFAULT_DAYS = 14
@@ -94,4 +94,7 @@ def format_summary(user: User, db: Session, days: int, today: Optional[date] = N
                        f"{sign}{change['change_kg']:.1f}kg")
     else:
         lines += _wrap("Weight: fewer than 2 weigh-ins, so no change to show")
+    average = seven_day_average(user.user_id, db, today)
+    if average is not None:
+        lines += _wrap(f"7-day average {average:.1f}kg")
     return ["\n".join(lines)]

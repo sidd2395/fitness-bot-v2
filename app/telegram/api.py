@@ -46,6 +46,10 @@ class TelegramAPI:
                 ]}
             self.call("sendMessage", **params)
 
+    def set_commands(self, commands: dict) -> None:
+        """The command menu Telegram shows next to the text box."""
+        self.call("setMyCommands", commands=[{"command": c, "description": d} for c, d in commands.items()])
+
     def send_typing(self, chat_id: str) -> None:
         self.call("sendChatAction", chat_id=chat_id, action="typing")
 

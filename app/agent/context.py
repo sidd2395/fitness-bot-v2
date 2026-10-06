@@ -4,9 +4,10 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.db.models import Checkin, Note, RawMessage, User
-from app.agent.stats import (claim_milestone, compute as compute_stats, describe_sleep_run,
-                             note_timing, weight_change_since_last)
-from app import clock
+from app.agent.stats import (claim_milestone, claim_steady_weight, claim_tip, compute as compute_stats,
+                             describe_sleep_run, lead_with_trend, note_timing,
+                             weight_change_since_last, weight_trend)
+from app import capabilities, clock
 from app.agent.tools import ONBOARDING_LABELS, ONBOARDING_STEPS
 
 # --------------------------------------------------------------------------- #
@@ -155,7 +156,7 @@ after yours.\
 """
 
 # Everything above is identical for every user and every turn: cached.
-STATIC_PROMPT = f"{COACH_PROMPT}\n\n{_TOOL_RULES}\n\n{_ONBOARDING_RULES}"
+STATIC_PROMPT = f"{COACH_PROMPT}\n\n{capabilities.prompt_text()}\n\n{_TOOL_RULES}\n\n{_ONBOARDING_RULES}"
 
 # --------------------------------------------------------------------------- #
 # Public entry point                                                            #
@@ -304,16 +305,27 @@ def _context_block(user: User, db: Session) -> str:
     if last:
         lines.append(f"Weight today {last['weight_kg']:.1f}kg: {last['in_words']}. "
                      "Use these words as given.")
-    if s["weight_change_7d"] is not None:
-        delta = s["weight_change_7d"]
-        words = "no change" if delta == 0 else f"{'up' if delta > 0 else 'down'} {abs(delta):.1f}kg"
-        lines.append(f"Weight over 7 days: {words}.")
+    goal = profile.goal if profile else None
+    trend = weight_trend(user.user_id, db, today, goal)
+    if trend:
+        lines.append(f"Trend: {trend['in_words']}. Use these words as given.")
+        lead = lead_with_trend(last, trend, goal)
+        if lead:
+            lines.append(lead)
+    steady = claim_steady_weight(user.user_id, db, today, goal)
+    if steady:
+        who = f"to check with {user.trainer_name}" if user.trainer_name else "to try"
+        lines.append(f"{steady}. Mention it once, calmly, with one small change {who}. Never a "
+                     "new diet.")
     # The only sleep counts the coach may use
     sleep_text = describe_sleep_run(s["sleep_run"])
     if sleep_text:
         lines.append(f"Short sleep: {sleep_text}")
     lines.append(f"Today: {s['logged_today']}.")
     lines.append(f"State: {s['user_state']}.")
+    tip = claim_tip(user.user_id, db, today)
+    if tip:
+        lines.append(f"Tip you may offer, at most once and only if it fits this reply: {tip}")
     # Stored as it's handed over, so it shows on this turn only
     milestone = claim_milestone(user.user_id, db, today)
     if milestone and active_issues:
