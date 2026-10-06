@@ -185,7 +185,7 @@ def _on_command(text: str, chat_id: str, user: Optional[User], api, db: Session)
             api.send_message(chat_id, replies.SUMMARY_USAGE)
         else:
             for message in format_summary(user, db, days):
-                api.send_message(chat_id, message, html=True)
+                api.send_message(chat_id, message)
     elif command == "/mydata":
         api.send_message(chat_id, format_mydata(user, db))
     elif command == "/delete":

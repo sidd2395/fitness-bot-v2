@@ -38,6 +38,8 @@ def _checkin_line(c: Checkin) -> str:
         bits.append(f"{c.protein_g:g}g protein")
     if c.water_l is not None:
         bits.append(f"{c.water_l:g}L water")
+    if c.food_note:
+        bits.append(f"food: {c.food_note}")
     return f"- {c.date} {c.entry_type}: {', '.join(bits) or 'no numbers'}"
 
 
@@ -72,14 +74,31 @@ def format_mydata(user: Optional[User], db: Session) -> str:
               f"Age: {_val(user.age)}",
               f"Sex: {_val(_SEX.get(user.sex))}",
               f"Goal: {_val(_GOALS.get(p.goal, p.goal) if p else None)}",
-              f"Starting weight: {_val(p.start_weight if p else None, 'kg')}",
-              f"Calorie target: {_val(p.calorie_target if p else None, ' kcal')}",
-              f"Protein target: {_val(p.protein_target_g if p else None, 'g')}",
-              f"Water target: {_val(p.water_target_l if p else None, 'L')}",
-              f"Targets set by: {_val({'user': 'you', 'coach': 'your coach'}.get(p.targets_set_by) if p else None)}",
-              f"Coach or trainer: {_val(user.trainer_name)}",
-              f"Sports: {_val(p.disciplines if p else None)}",
-              f"Why you started: {_val(p.motivation if p else None)}"]
+              f"Starting weight: {_val(p.start_weight if p else None, 'kg')}"]
+    # Optional fields only when there's something in them
+    if user.trainer_name:
+        lines.append(f"Coach or trainer: {user.trainer_name}")
+    if p and p.disciplines:
+        lines.append(f"Sports: {p.disciplines.replace(',', ', ')}")
+    if p and p.motivation:
+        lines.append(f"Why you started: {p.motivation}")
+
+    lines += ["", "Targets"]
+    targets = []
+    if p and p.calorie_target:
+        targets.append(f"Calories: {p.calorie_target} kcal")
+    if p and p.protein_target_g:
+        targets.append(f"Protein: {p.protein_target_g}g")
+    if p and p.water_target_l:
+        targets.append(f"Water: {p.water_target_l:g}L")
+    if targets:
+        lines += targets
+        who = {"user": "you", "coach": "your coach"}.get(p.targets_set_by)
+        if who:
+            lines.append(f"Set by {who}")
+    else:
+        lines.append("No targets set. Coach Bob doesn't set calorie or protein targets; tell him "
+                     "yours if you have them.")
 
     lines += ["", "Injuries and health issues"]
     lines += [f"- {i.what} ({i.status}, since {i.first_mentioned:%Y-%m-%d})" for i in user.issues] or ["none"]

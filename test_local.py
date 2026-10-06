@@ -942,10 +942,8 @@ def _kim_no_missing_claim(ctx: Ctx) -> CheckResult:
 
 
 def _kim_summary_matches_db(ctx: Ctx) -> CheckResult:
-    """/summary 10 through the Telegram handler: every check-in day in the table,
-    each cell equal to the DB, sent as HTML."""
-    import html as html_lib
-    from app.telegram.summary import TRAINING_WIDTH
+    """/summary 10 through the Telegram handler: one block per check-in day, its
+    first line and every value equal to the DB, no line over 30 characters."""
     chat = "5550100"
     user = _user(ctx)
     user.telegram_chat_id = chat
@@ -953,29 +951,34 @@ def _kim_summary_matches_db(ctx: Ctx) -> CheckResult:
     with _telegram(chat) as t:
         t.send(_tg_text(chat, "/summary 10"), ctx.db)
         text = "\n".join(t.api.texts(chat))
-        sent_html = all(getattr(t.api, "html", [False]))
-    pre = re.search(r"<pre>(.*?)</pre>", text, re.S)
-    lines = html_lib.unescape(pre.group(1)).splitlines()[2:] if pre else []
-    table = {}
-    for line in lines:
-        cells = [line[0:6], line[7:13], line[14:19], line[20:20 + TRAINING_WIDTH], line[21 + TRAINING_WIDTH:]]
-        table[cells[0].strip()] = [c.strip() for c in cells[1:]]
+    blocks = {b.splitlines()[0]: " ".join(l.strip() for l in b.splitlines()[1:])
+              for b in text.split("\n\n")[1:-2]}
     since = date.today() - timedelta(days=9)
-    expected = {}
+    days: dict = {}
     for c in _checkins(ctx):
-        if c.date < since:
+        if c.date >= since:
+            days.setdefault(c.date, []).append(c)
+    wrong = []
+    for d, rows in sorted(days.items()):
+        weight = next((r.weight_kg for r in reversed(rows) if r.weight_kg is not None), None)
+        sleep = next((r.sleep_hours for r in reversed(rows) if r.sleep_hours is not None), None)
+        nums = ([f"{weight:.1f}kg"] if weight is not None else []) + \
+               ([f"{sleep:g}h sleep"] if sleep is not None else [])
+        head = f"{d:%a} {d.day} {d:%b}" + (f"  {' · '.join(nums)}" if nums else "")
+        if head not in blocks:
+            wrong.append(f"no line {head!r}")
             continue
-        row = expected.setdefault(c.date.strftime("%d %b"), ["-", "-", "-", "-"])
-        if c.weight_kg is not None:
-            row[0] = f"{c.weight_kg:.1f}"
-        if c.sleep_hours is not None:
-            row[1] = f"{c.sleep_hours:g}h"
-        if c.training:
-            row[2] = c.training if len(c.training) <= TRAINING_WIDTH else c.training[:TRAINING_WIDTH - 1] + "…"
-        if c.energy is not None:
-            row[3] = f"{c.energy}/5"
-    ok = bool(expected) and table == expected and sent_html
-    return ok, f"table={table}, db={expected}, html={sent_html}"
+        body = blocks[head]
+        for r in rows:
+            if r.training and " ".join(r.training.split()) not in body:
+                wrong.append(f"{head}: training {r.training!r} missing")
+            if r.energy is not None and f"energy {r.energy}/5" not in body:
+                wrong.append(f"{head}: energy {r.energy} missing")
+    if len(blocks) != len(days):
+        wrong.append(f"{len(blocks)} day blocks for {len(days)} days")
+    long_lines = [l for l in text.splitlines() if len(l) > 30]
+    ok = bool(days) and not wrong and not long_lines
+    return ok, f"wrong={wrong}, lines over 30={long_lines}, blocks={list(blocks)}"
 
 
 # Dev: profile facts picked up in normal chat after onboarding.
@@ -1030,8 +1033,8 @@ def _dev_mydata(ctx: Ctx) -> CheckResult:
     with _telegram(chat) as t:
         t.send(_tg_text(chat, "/mydata"), ctx.db)
         text = "\n".join(t.api.texts(chat))
-    want = ["Coach or trainer: Dan", "Muay Thai", "Calorie target: 2200 kcal",
-            "Protein target: 160g", "Targets set by: your coach"]
+    want = ["Coach or trainer: Dan", "Muay Thai", "Calories: 2200 kcal",
+            "Protein: 160g", "Set by your coach"]
     missing = [w for w in want if w.lower() not in text.lower()]
     return not missing, f"missing: {missing}"
 
@@ -1535,7 +1538,7 @@ def _code_local_time(db) -> CheckResult:
 
 def _code_history(db) -> CheckResult:
     """get_history: days clamped to 60, a day's entries merged, bad input refused;
-    /summary escapes HTML and shows blanks as "-"."""
+    /summary shows the merged day in lines of 30 characters or fewer."""
     from app.telegram.summary import format_summary
     uid = _onboarded_user(db)
     t = date.today()
@@ -1552,9 +1555,10 @@ def _code_history(db) -> CheckResult:
     merged = rows == [{"date": str(t - timedelta(days=2)), "weight_kg": 80.0, "sleep_hours": 7.0,
                        "training": "legs <heavy>", "energy": 4}]
     text = "\n".join(format_summary(db.get(User, uid), db, 14))
+    longest = max(len(line) for line in text.splitlines())
     ok = (wide["from"] == str(t - timedelta(days=59)) and merged and "error" in bad
-          and "legs &lt;heavy&gt;" in text and "<heavy>" not in text)
-    return ok, f"from={wide['from']}, rows={rows}, bad={bad}, escaped={'&lt;heavy&gt;' in text}"
+          and "legs <heavy>" in text and "80.0kg · 7h sleep" in text and longest <= 30)
+    return ok, f"from={wide['from']}, rows={rows}, bad={bad}, longest line={longest}"
 
 
 def _code_profile_from_chat(db) -> CheckResult:
@@ -1617,6 +1621,30 @@ def _code_forced_checkin_scope(db) -> CheckResult:
     if set(kept) != {"training", "weight_kg", "sleep_hours", "energy"}:
         wrong.append(f"dropped this message's data: {kept}")
     return not wrong, f"wrong: {wrong}"
+
+
+def _code_food_note(db) -> CheckResult:
+    """Food in words is saved as a note; a calorie number not in the message isn't."""
+    uid = _onboarded_user(db)
+    m = RawMessage(user_id=uid, body="slept badly, skipped gym, ate light")
+    db.add(m)
+    db.commit()
+    result = dispatch("log_checkin", {"is_checkin": True, "entry_type": "evening", "food_note": "ate light",
+                                      "calories": 1500, "training": "skipped gym"}, uid, m.id, db)
+    c = db.query(Checkin).filter(Checkin.user_id == uid).first()
+    ok = (c is not None and c.food_note == "ate light" and c.calories is None
+          and "calories" in result.get("rejected", {}))
+    return ok, f"food_note={c.food_note if c else None!r}, calories={c.calories if c else None}, result={result}"
+
+
+def _code_mydata_optional(db) -> CheckResult:
+    """/mydata leaves out empty optional fields and explains when there are no targets."""
+    from app.telegram.mydata import format_mydata
+    uid = _onboarded_user(db)
+    text = format_mydata(db.get(User, uid), db)
+    ok = ("not set" not in text and "No targets set. Coach Bob doesn't set calorie or protein "
+          "targets; tell him yours if you have them." in text and "Coach or trainer" not in text)
+    return ok, f"'not set' in text: {'not set' in text}"
 
 
 def _code_profile_locked(db) -> CheckResult:
@@ -1910,9 +1938,11 @@ CODE_CHECKS = [
     ("note dates: status computed in code, bad dates refused", _code_note_dates),
     ("injury reminder line flips once a reply names the body part", _code_issue_reminder),
     ("context shows Singapore local time and part of day", _code_local_time),
-    ("get_history merges a day, caps at 60; /summary escapes HTML", _code_history),
+    ("get_history merges a day, caps at 60; /summary lines fit 30 chars", _code_history),
     ("trainer, sports and confirmed targets update from chat", _code_profile_from_chat),
     ("forced check-in: targets skip it, only this message's data", _code_forced_checkin_scope),
+    ("/mydata: no 'not set', and says when there are no targets", _code_mydata_optional),
+    ("food in words saved as food_note, never as calories", _code_food_note),
     ("telegram: allowlist turns strangers away and stores nothing", _code_tg_allowlist),
     ("telegram: wrong webhook secret gets 401", _code_tg_webhook_secret),
     ("telegram: duplicate update_id handled once", _code_tg_duplicate),

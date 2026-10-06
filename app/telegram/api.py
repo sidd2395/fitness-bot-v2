@@ -34,16 +34,12 @@ class TelegramAPI:
         return data["result"]
 
     def send_message(self, chat_id: str, text: str,
-                     buttons: Optional[list[tuple[str, str]]] = None, html: bool = False) -> None:
+                     buttons: Optional[list[tuple[str, str]]] = None) -> None:
         """Sends text, split if it's over Telegram's limit. Buttons, as
-        (label, callback data) pairs in one row, go on the last part. html=True
-        is only for text built in code (/summary), never model output, and must
-        already fit in one message: splitting could cut a tag."""
-        parts = [text] if html else split_message(text)
+        (label, callback data) pairs in one row, go on the last part."""
+        parts = split_message(text)
         for i, part in enumerate(parts):
             params = {"chat_id": chat_id, "text": part}
-            if html:
-                params["parse_mode"] = "HTML"
             if buttons and i == len(parts) - 1:
                 params["reply_markup"] = {"inline_keyboard": [
                     [{"text": label, "callback_data": data} for label, data in buttons]
