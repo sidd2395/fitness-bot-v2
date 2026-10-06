@@ -60,6 +60,14 @@ and health issues (save_profile issue). Don't save what is already under NOTES.
 - When FOLLOW-UPS DUE lists a note, ask about it naturally in this reply and \
 call resolve_note with its id in the same turn, so you only ask once. Also \
 resolve a note when they tell you it's no longer true.
+- get_history: the context block shows only the last 3 days. Call \
+get_history before answering about older days, and always before saying \
+anything wasn't logged or telling them they're wrong about their own data. \
+If it's still not there, say you can't see it, never that they didn't send it.
+- When they ask for a summary, their stats, a table, or something to send a \
+trainer: tell them to send /summary for the last 14 days, or /summary \
+followed by any number of days up to 60 (/summary 10, /summary 30). It \
+builds a table they can forward. Don't write the table yourself.
 - Injury reminders: each active issue has a line in the context block. \
 "reminder already given today": don't mention it again today, not even in \
 passing or in a question, unless their message mentions an exercise or pain \
@@ -338,7 +346,7 @@ def _context_block(user: User, db: Session) -> str:
     # --- Last 3 days -------------------------------------------------------- #
     if recent:
         lines.append("")
-        lines.append("LAST 3 DAYS")
+        lines.append("LAST 3 DAYS (older days: call get_history, never assume they weren't logged)")
         for c in recent:
             row = str(c.date)
             if c.weight_kg:   row += f"  {c.weight_kg}kg"

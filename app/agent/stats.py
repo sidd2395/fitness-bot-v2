@@ -255,3 +255,48 @@ def note_timing(starts_on: Optional[date], ends_on: Optional[date], today: date)
         return "happening now, last day today" if left == 0 else f"happening now, ends in {days(left)}"
     n = (today - end).days
     return "ended yesterday" if n == 1 else f"ended {days(n)} ago"
+
+
+# --------------------------------------------------------------------------- #
+# History: the check-ins in a date range, one row per day. Shared by the        #
+# get_history tool and /summary, so both always show the same numbers.          #
+# --------------------------------------------------------------------------- #
+
+HISTORY_MAX_DAYS = 60
+_DAY_FIELDS = ("weight_kg", "sleep_hours", "energy", "calories", "protein_g", "water_l")
+
+
+def daily_history(user_id: int, db: Session, days: int, today: date) -> list[dict]:
+    """One dict per day with a check-in, oldest first, over the last `days` days
+    including today. A day's morning and evening entries are merged: the later
+    entry's value wins for each number, training from both is kept."""
+    start = today - timedelta(days=days - 1)
+    rows = (db.query(Checkin)
+            .filter(Checkin.user_id == user_id, Checkin.date >= start, Checkin.date <= today)
+            .order_by(Checkin.date, Checkin.created_at, Checkin.checkin_id)
+            .all())
+    by_day: dict = {}
+    for c in rows:
+        day = by_day.setdefault(c.date, {"date": c.date, "training": [],
+                                         **{f: None for f in _DAY_FIELDS}})
+        for f in _DAY_FIELDS:
+            if getattr(c, f) is not None:
+                day[f] = getattr(c, f)
+        if c.training and c.training not in day["training"]:
+            day["training"].append(c.training)
+    out = []
+    for d in by_day.values():
+        d["training"] = "; ".join(d["training"]) or None
+        out.append(d)
+    return out
+
+
+def weight_change_over(history: list[dict]) -> Optional[dict]:
+    """First and last weigh-in in the rows, and the change between them."""
+    weighed = [d for d in history if d["weight_kg"] is not None]
+    if len(weighed) < 2:
+        return None
+    first, last = weighed[0], weighed[-1]
+    return {"from_kg": first["weight_kg"], "from_date": first["date"],
+            "to_kg": last["weight_kg"], "to_date": last["date"],
+            "change_kg": round(last["weight_kg"] - first["weight_kg"], 1)}

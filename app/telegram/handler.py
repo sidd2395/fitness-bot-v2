@@ -21,6 +21,7 @@ from app.db.models import RawMessage, TelegramUpdate, User
 from app.db.session import SessionLocal
 from app.telegram import replies
 from app.telegram.mydata import format_mydata
+from app.telegram.summary import format_summary, parse_days
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +167,7 @@ def _handle(update: dict, api, db: Session) -> None:
 def _on_command(text: str, chat_id: str, user: Optional[User], api, db: Session) -> None:
     command = text.split()[0].split("@")[0].lower()
     _log(f"command{command.replace('/', '_')}" if command in
-         ("/start", "/help", "/mydata", "/delete") else "command_unknown", user)
+         ("/start", "/help", "/mydata", "/delete", "/summary") else "command_unknown", user)
     if command == "/start":
         # Telegram sends /start when someone first opens the bot
         if user is None or (user.consent_given_at is None and not user.blocked):
@@ -175,6 +176,16 @@ def _on_command(text: str, chat_id: str, user: Optional[User], api, db: Session)
             api.send_message(chat_id, replies.HELP)
     elif command == "/help":
         api.send_message(chat_id, replies.HELP)
+    elif command == "/summary":
+        parts = text.split()
+        days = parse_days(parts[1] if len(parts) > 1 else None)
+        if user is None:
+            api.send_message(chat_id, replies.NOTHING_HELD)
+        elif days is None:
+            api.send_message(chat_id, replies.SUMMARY_USAGE)
+        else:
+            for message in format_summary(user, db, days):
+                api.send_message(chat_id, message, html=True)
     elif command == "/mydata":
         api.send_message(chat_id, format_mydata(user, db))
     elif command == "/delete":

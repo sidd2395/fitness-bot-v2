@@ -29,6 +29,8 @@ HELP = (
     "also just tell me how training's going or ask a question.\n\n"
     "Commands:\n"
     "/help: this message\n"
+    "/summary: your check-ins as a table to send your trainer (last 14 days, or e.g. "
+    "/summary 30 for 30 days)\n"
     "/mydata: everything I hold about you\n"
     "/delete: erase everything I hold about you"
 )
@@ -44,3 +46,4 @@ DELETED = (
 )
 DELETE_CANCELLED = "Cancelled. Nothing was deleted."
 NOTHING_HELD = "I don't hold anything about you."
+SUMMARY_USAGE = "Send /summary for the last 14 days, or /summary 30 for up to 60 days."

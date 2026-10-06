@@ -9,8 +9,9 @@ A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
   `save_profile`, coaching loop, safety net, empty-reply handling, style cleanup,
   fixed replies (welcome, blocked, all set). Models come from `MODEL_ONBOARDING`
   and `MODEL_COACH`.
-- `app/agent/tools.py`: `log_checkin`, `save_profile`, `remember` and
-  `resolve_note` schemas and handlers. Range checks, number words, pounds to kg,
+- `app/agent/tools.py`: `log_checkin`, `save_profile`, `remember`,
+  `resolve_note` and `get_history` (up to 60 days; the context block only has
+  3) schemas and handlers. Range checks, number words, pounds to kg,
   correction guard, under-18 block, motivation fallback, notes cap (30 open).
   Onboarding is `ONBOARDING_STEPS` (8) questions; never hard-code the count.
 - `app/agent/context.py`: system prompt. Static part (coach.md, tool rules,
@@ -24,8 +25,10 @@ A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
 - `app/telegram/handler.py`: `handle_update`, shared by polling and the webhook.
   Allowlist, duplicate update ids (`telegram_updates`), rate limit, text only,
   commands, consent (no user row until "I agree"), daily cap, then `run()`.
-  `replies.py` holds its fixed replies, `mydata.py` the /mydata text, `api.py`
-  the Bot API calls and message splitting.
+  `replies.py` holds its fixed replies, `mydata.py` the /mydata text,
+  `summary.py` the /summary table (HTML `<pre>`, from `stats.daily_history`,
+  the same rows `get_history` returns), `api.py` the Bot API calls and
+  message splitting.
 - `app/main.py`: FastAPI. `POST /telegram/webhook` (secret header or 401,
   handled in a background task), `GET /health`, migrations on startup.
 - `app/logs.py`: JSON logs in prod. Never log message text, replies, names or keys.
@@ -85,7 +88,8 @@ acknowledged, several goals at once save none, no promises to message first
 local time and part of day in the context block, once-a-day injury
 reminders tracked in code, note start/end dates with status computed in
 code (migration 009), and "they check in with you" in coach.md (new persona
-rohan; rohan, tom, lena, maya, nadia pass).
+rohan; rohan, tom, lena, maya, nadia pass). Then get_history, the rule never
+to call data missing without it, and /summary [days] (new persona kim).
 
 Phase 2, part 1 is built and passes the code-level checks, but hasn't been
 tried on a phone yet: Telegram layer, polling, webhook, allowlist, consent,

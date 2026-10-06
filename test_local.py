@@ -895,6 +895,89 @@ def _rohan_back_once(ctx: Ctx) -> CheckResult:
     return len(hits) <= 1, f"replies mentioning the back: {hits}"
 
 
+# Kim: Sid's 6 Oct summary request. A full check-in 6 days back is outside the
+# context block's 3 days; the coach must look it up, not call it missing.
+_KIM_FULL = "71.2kg, slept 7.5h, 5k easy run, energy 4"
+_KIM_TABLE = "can I get all my check-ins from the past 10 days in a table for my PT"
+_KIM_PUSH = "that doesn't say much about my sleep or training from last week, didn't I send that?"
+_MISSING_CLAIM = re.compile(
+    r"\b(never (came|got|went) (through|in)|(wasn'?t|weren'?t|was not|not|never) (logged|sent|recorded)"
+    r"|didn'?t (come|get) through|not in the record|no (sleep|training) (came|was|got)"
+    r"|only (have |got )?(the |your )?weight|that'?s all i'?ve got|nothing (logged|recorded))\b", re.I)
+
+
+def _kim_ask_day(ctx: Ctx) -> None:
+    day = date.today() - timedelta(days=6)
+    ctx.marks["kim_ask"] = f"what did I log on {day:%A %d %B}?"
+    send(ctx, ctx.marks["kim_ask"])
+
+
+def _kim_sent(ctx: Ctx, message: str):
+    return next((s for s in ctx.sent if s.message == message), None)
+
+
+def _kim_looked_up(ctx: Ctx) -> CheckResult:
+    s = _kim_sent(ctx, ctx.marks.get("kim_ask", ""))
+    tools = [(n, i) for n, i, _ in s.tools] if s else []
+    return any(n == "get_history" for n, _ in tools), f"tools: {tools}"
+
+
+def _kim_right_day(ctx: Ctx) -> CheckResult:
+    reply = _reply(ctx, ctx.marks.get("kim_ask", ""))
+    ok = "7.5" in reply and bool(re.search(r"\b(5k|5 ?km|run)\b", reply, re.I))
+    return ok, f"reply: {reply!r}"
+
+
+def _kim_points_to_summary(ctx: Ctx) -> CheckResult:
+    reply = _reply(ctx, _KIM_TABLE)
+    return "/summary" in reply, f"reply: {reply!r}"
+
+
+def _kim_no_missing_claim(ctx: Ctx) -> CheckResult:
+    """Sid's case: the data exists, so no reply may say it wasn't logged."""
+    bad = [(s.message, m.group(0)) for s in ctx.sent
+           if s.message in (ctx.marks.get("kim_ask"), _KIM_TABLE, _KIM_PUSH)
+           for m in _MISSING_CLAIM.finditer(s.reply)]
+    return not bad, f"claims: {bad}"
+
+
+def _kim_summary_matches_db(ctx: Ctx) -> CheckResult:
+    """/summary 10 through the Telegram handler: every check-in day in the table,
+    each cell equal to the DB, sent as HTML."""
+    import html as html_lib
+    from app.telegram.summary import TRAINING_WIDTH
+    chat = "5550100"
+    user = _user(ctx)
+    user.telegram_chat_id = chat
+    ctx.db.commit()
+    with _telegram(chat) as t:
+        t.send(_tg_text(chat, "/summary 10"), ctx.db)
+        text = "\n".join(t.api.texts(chat))
+        sent_html = all(getattr(t.api, "html", [False]))
+    pre = re.search(r"<pre>(.*?)</pre>", text, re.S)
+    lines = html_lib.unescape(pre.group(1)).splitlines()[2:] if pre else []
+    table = {}
+    for line in lines:
+        cells = [line[0:6], line[7:13], line[14:19], line[20:20 + TRAINING_WIDTH], line[21 + TRAINING_WIDTH:]]
+        table[cells[0].strip()] = [c.strip() for c in cells[1:]]
+    since = date.today() - timedelta(days=9)
+    expected = {}
+    for c in _checkins(ctx):
+        if c.date < since:
+            continue
+        row = expected.setdefault(c.date.strftime("%d %b"), ["-", "-", "-", "-"])
+        if c.weight_kg is not None:
+            row[0] = f"{c.weight_kg:.1f}"
+        if c.sleep_hours is not None:
+            row[1] = f"{c.sleep_hours:g}h"
+        if c.training:
+            row[2] = c.training if len(c.training) <= TRAINING_WIDTH else c.training[:TRAINING_WIDTH - 1] + "…"
+        if c.energy is not None:
+            row[3] = f"{c.energy}/5"
+    ok = bool(expected) and table == expected and sent_html
+    return ok, f"table={table}, db={expected}, html={sent_html}"
+
+
 PERSONAS = [
     Persona(
         name="priya",
@@ -1105,6 +1188,27 @@ PERSONAS = [
             ("no reply asks how tonight's gym session went", _rohan_no_gym_assumed),
             ("back reminder at most once that day", _rohan_back_once),
             ("back strain saved once", one_active_issue),
+        ],
+    ),
+    Persona(
+        name="kim",
+        summary="Asks about a check-in 6 days back, wants a table for her PT, pushes back",
+        steps=[
+            "hi", "Kim", "33", "female", "72", "lose fat", "feel fitter", "no", "no",
+            _KIM_FULL,
+            advance_days(6),
+            "70.6, slept 6.5h",
+            _kim_ask_day,
+            _KIM_TABLE,
+            _KIM_PUSH,
+        ],
+        checks=[
+            ("onboarding complete", onboarding_complete),
+            ("looks up the older day with get_history", _kim_looked_up),
+            ("states that day's sleep and training", _kim_right_day),
+            ("points to /summary for the table", _kim_points_to_summary),
+            ("never says existing data is missing", _kim_no_missing_claim),
+            ("/summary 10 table matches the DB", _kim_summary_matches_db),
         ],
     ),
     Persona(
@@ -1350,6 +1454,30 @@ def _code_local_time(db) -> CheckResult:
     return ok, f"line={line!r}, parts={parts}"
 
 
+def _code_history(db) -> CheckResult:
+    """get_history: days clamped to 60, a day's entries merged, bad input refused;
+    /summary escapes HTML and shows blanks as "-"."""
+    from app.telegram.summary import format_summary
+    uid = _onboarded_user(db)
+    t = date.today()
+    db.add(Checkin(user_id=uid, date=t - timedelta(days=2), entry_type="morning", weight_kg=80.0,
+                   sleep_hours=7.0, raw_message="x"))
+    db.add(Checkin(user_id=uid, date=t - timedelta(days=2), entry_type="evening", training="legs <heavy>",
+                   energy=4, raw_message="x"))
+    db.add(Checkin(user_id=uid, date=t - timedelta(days=70), entry_type="morning", weight_kg=82.0,
+                   raw_message="x"))
+    db.commit()
+    wide = dispatch("get_history", {"days": 100}, uid, 0, db)
+    bad = dispatch("get_history", {"days": 0}, uid, 0, db)
+    rows = wide["checkins"]
+    merged = rows == [{"date": str(t - timedelta(days=2)), "weight_kg": 80.0, "sleep_hours": 7.0,
+                       "training": "legs <heavy>", "energy": 4}]
+    text = "\n".join(format_summary(db.get(User, uid), db, 14))
+    ok = (wide["from"] == str(t - timedelta(days=59)) and merged and "error" in bad
+          and "legs &lt;heavy&gt;" in text and "<heavy>" not in text)
+    return ok, f"from={wide['from']}, rows={rows}, bad={bad}, escaped={'&lt;heavy&gt;' in text}"
+
+
 def _code_profile_locked(db) -> CheckResult:
     """After onboarding, saved profile values change only when the user's own
     message says so; a model-supplied confirmation flag counts for nothing."""
@@ -1389,8 +1517,9 @@ class FakeTelegram:
     def __init__(self):
         self.sent: list = []   # (chat_id, text, buttons)
 
-    def send_message(self, chat_id, text, buttons=None):
+    def send_message(self, chat_id, text, buttons=None, html=False):
         self.sent.append((chat_id, text, buttons))
+        self.html = getattr(self, "html", []) + [html]
 
     def texts(self, chat_id) -> list:
         return [t for c, t, _ in self.sent if c == chat_id]
@@ -1640,6 +1769,7 @@ CODE_CHECKS = [
     ("note dates: status computed in code, bad dates refused", _code_note_dates),
     ("injury reminder line flips once a reply names the body part", _code_issue_reminder),
     ("context shows Singapore local time and part of day", _code_local_time),
+    ("get_history merges a day, caps at 60; /summary escapes HTML", _code_history),
     ("telegram: allowlist turns strangers away and stores nothing", _code_tg_allowlist),
     ("telegram: wrong webhook secret gets 401", _code_tg_webhook_secret),
     ("telegram: duplicate update_id handled once", _code_tg_duplicate),

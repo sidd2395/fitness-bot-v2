@@ -4,8 +4,9 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.db.models import Checkin, Issue, Note, Profile, RawMessage, User
-from app.agent.stats import (claim_milestone, compute as compute_stats, describe_sleep_run,
-                             note_timing, weight_change_since_last)
+from app.agent.stats import (HISTORY_MAX_DAYS, claim_milestone, compute as compute_stats,
+                             daily_history, describe_sleep_run, note_timing,
+                             weight_change_since_last)
 
 CALORIE_FLOOR = {"M": 1500, "F": 1200}
 
@@ -187,6 +188,20 @@ TOOL_SCHEMAS = [
         },
     },
     {
+        "name": "get_history",
+        "description": (
+            "Their check-ins over the last N days (max 60), one row per day: weight, sleep, "
+            "training, energy, calories, protein, water, plus active issues. The context block "
+            "only shows the last 3 days. Call this before saying anything about older days, and "
+            "always before saying something wasn't logged."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"days": {"type": "integer", "description": "How many days back, today included. 1 to 60."}},
+            "required": ["days"],
+        },
+    },
+    {
         "name": "resolve_note",
         "description": (
             "Mark a note as done: its follow-up has been asked about, or it's no longer true. "
@@ -210,6 +225,8 @@ def dispatch(name: str, inp: dict, user_id: int, raw_msg_id: int, db: Session) -
         return _remember(inp, user_id, db)
     if name == "resolve_note":
         return _resolve_note(inp, user_id, db)
+    if name == "get_history":
+        return _get_history(inp, user_id, db)
     return {"error": f"unknown tool: {name}"}
 
 
@@ -517,8 +534,9 @@ def _add_refusals(result: dict, rejected: dict, needs_confirmation: dict) -> Non
         result["needs_confirmation"] = needs_confirmation
         result["message"] = (
             "These fields already have a value today and were NOT changed, because the "
-            "message didn't say it was a correction. Ask one short yes/no question naming "
-            "the new value, like 'Update today's weight to 63.0?'. Only after they say yes, "
+            "message didn't say it was a correction. Your whole reply is one short yes/no "
+            "question naming the new value, like 'Update today's weight to 63.0?'. No other "
+            "question and nothing before it. Only after they say yes, "
             "call log_checkin again with the new value and is_correction=true."
         )
 
@@ -1029,3 +1047,30 @@ def _resolve_note(inp: dict, user_id: int, db: Session) -> dict:
     note.resolved = True
     db.commit()
     return {"resolved": True, "note_id": note.note_id}
+
+
+
+# ---------------------------------------------------------------------------
+# get_history: check-ins beyond the 3 days in the context block
+# ---------------------------------------------------------------------------
+
+def _get_history(inp: dict, user_id: int, db: Session) -> dict:
+    user = db.get(User, user_id)
+    if not _onboarded(user):
+        return _NOT_ONBOARDED
+    days = parse_number(inp.get("days"))
+    if days is None or days < 1:
+        return {"error": "days must be a whole number from 1 to 60."}
+    days = min(int(days), HISTORY_MAX_DAYS)
+    today = date.today()
+    rows = daily_history(user_id, db, days, today)
+    return {
+        "from": str(today - timedelta(days=days - 1)),
+        "to": str(today),
+        "days_with_checkins": len(rows),
+        "checkins": [{k: (str(v) if k == "date" else v) for k, v in r.items() if v is not None}
+                     for r in rows],
+        "missing_means": ("A day not listed has no check-in. A field left out of a day "
+                          "wasn't logged that day. This is the whole record for these days."),
+        "active_issues": [i.what for i in user.issues if i.status == "active"],
+    }
