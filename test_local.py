@@ -1848,6 +1848,47 @@ def _code_help_and_all_set(db) -> CheckResult:
     return not wrong, f"wrong: {wrong}"
 
 
+def _code_unbacked_save(db) -> CheckResult:
+    """A reply that says something was saved, when no tool saved anything, gets one
+    more step with the note; still a claim with nothing saved, the honest line goes
+    out instead. A rewrite without the claim goes out as written."""
+    from app.agent.loop import NO_SAVE_NOTE, UNBACKED_SAVE_REPLY, claims_a_save
+
+    def text(t):
+        return SimpleNamespace(stop_reason="end_turn", content=[SimpleNamespace(type="text", text=t)])
+
+    def run_with(replies):
+        uid = _onboarded_user(db)
+        seen = []
+
+        def fake_call(model, user_id, system, messages, **kw):
+            seen.append(messages[-1])
+            return replies.pop(0)
+        real = agent_loop._call
+        agent_loop._call = fake_call
+        try:
+            out = run(uid, "yes", db)
+        finally:
+            agent_loop._call = real
+        notes = [m for m in seen if isinstance(m.get("content"), list)
+                 and any(b.get("text") == NO_SAVE_NOTE for b in m["content"] if isinstance(b, dict))]
+        return out, len(notes)
+
+    stubborn, n1 = run_with([text("Done, got it saved as Dan's targets for you."),
+                             text("Done, got it saved as Dan's targets.")])
+    honest, n2 = run_with([text("Done, got it saved as Dan's targets for you."),
+                           text("Those aren't saved yet. Want me to save 2200 cal and 160g protein?")])
+    past, n3 = run_with([text("On the 30th you logged 71.2kg and 7.5h sleep.")])
+    misses = [t for t in ("Got it, 63.0 noted.", "That's logged.", "I've updated your target.")
+              if not claims_a_save(t)]
+    false_hits = [t for t in ("You've logged 7 check-ins.", "You're all set.", "Already logged for today.")
+                  if claims_a_save(t)]
+    ok = (stubborn == UNBACKED_SAVE_REPLY and n1 == 1 and honest.startswith("Those aren't saved")
+          and n2 == 1 and n3 == 0 and not misses and not false_hits)
+    return ok, (f"stubborn={stubborn!r} notes={n1}; honest={honest!r} notes={n2}; past notes={n3}; "
+                f"missed={misses}; false hits={false_hits}")
+
+
 def _code_mydata_optional(db) -> CheckResult:
     """/mydata leaves out empty optional fields and explains when there are no targets."""
     from app.telegram.mydata import format_mydata
@@ -2156,6 +2197,7 @@ CODE_CHECKS = [
     ("food in words saved as food_note, never as calories", _code_food_note),
     ("weight change phrase built in code", _code_weight_words),
     ("sports named in a message are added in code", _code_sports),
+    ("a reply can't claim a save no tool made", _code_unbacked_save),
     ("7-day trend phrase, and lead with it when today is the wrong way", _code_trend),
     ("weight steady for 3 weeks flagged once, only for weight goals", _code_steady),
     ("tips: one every 3 days at most, each kind once", _code_tips),

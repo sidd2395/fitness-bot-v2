@@ -47,6 +47,13 @@ EMPTY_REPLY_SAVED = (
 EMPTY_REPLY_NOTHING_SAVED = (
     "Sorry, I couldn't put a reply together just now. Try sending that again in a moment."
 )
+# The reply said something was saved but no tool saved anything this turn.
+# Sent back as a tool-result style note for one more step.
+NO_SAVE_NOTE = (
+    "No tool saved anything this turn. Call the tool now, or reply without saying it was saved."
+)
+# Still a save claim with nothing saved after that step: an honest line instead
+UNBACKED_SAVE_REPLY = "Sorry, that didn't save on my side. Send it once more and I'll try again."
 # Sent back with tool results when the model wrote text alongside its tool call.
 # That text is a draft and is never sent, so the next reply has to stand alone.
 DRAFT_NOT_SENT_NOTE = (
@@ -212,7 +219,8 @@ def _coach(user: User, message: str, messages: list, raw_msg: RawMessage, db: Se
     tool_calls_used = 0
     checkin_logged = False
     safety_net_run = False
-    saved_this_turn = False
+    claim_checked = False   # the reply was sent back once for claiming an unmade save
+    saved_this_turn = False   # a write tool actually saved or resolved something
     final = ""              # text of the response that ends the turn: the reply
     drafts: list[str] = []  # text written alongside tool calls: never sent unless final is empty
 
@@ -239,7 +247,7 @@ def _coach(user: User, message: str, messages: list, raw_msg: RawMessage, db: Se
                 _log("forced_fields_dropped", user_id, ",".join(dropped))
             tool_results.append(_tool_result(block.id, result))
             tool_calls_used += 1
-            saved_this_turn = saved_this_turn or bool(result.get("saved"))
+            saved_this_turn = saved_this_turn or bool(result.get("saved")) or bool(result.get("resolved"))
             _log("forced_checkin" if force_checkin else "tool_call", user_id,
                  f"{block.name} saved={bool(result.get('saved'))}")
             if block.name == "log_checkin":
@@ -284,6 +292,15 @@ def _coach(user: User, message: str, messages: list, raw_msg: RawMessage, db: Se
                     raw_msg.status = "failed"
                     db.commit()
             final = _all_text(response)
+            # Never trust the model's word about what happened: a reply saying
+            # something was saved, with no write this turn, gets one more step
+            if final and not saved_this_turn and not claim_checked and claims_a_save(final):
+                claim_checked = True
+                _log("unbacked_save_claim", user_id)
+                messages.append({"role": "assistant", "content": response.content})
+                messages.append({"role": "user", "content": [{"type": "text", "text": NO_SAVE_NOTE}]})
+                final = ""
+                continue
             break
 
         messages.append({"role": "assistant", "content": response.content})
@@ -318,7 +335,30 @@ def _coach(user: User, message: str, messages: list, raw_msg: RawMessage, db: Se
     if not reply:
         _log("empty_reply_fallback", user_id, "saved" if saved_this_turn else "nothing_saved")
         reply = EMPTY_REPLY_SAVED if saved_this_turn else EMPTY_REPLY_NOTHING_SAVED
+    if not saved_this_turn and claims_a_save(reply):
+        _log("unbacked_save_reply_replaced", user_id)
+        reply = UNBACKED_SAVE_REPLY
     return reply
+
+
+# A claim, in the coach's own voice, that something was saved just now. Not "you
+# logged 71.2 on the 30th" (a fact about the past), and not bare "set" ("you're all set").
+_SAVE_CLAIM = re.compile(
+    r"\b(i'?ve|i have|i)\s+(just\s+|now\s+|also\s+)?"
+    r"(saved|logged|recorded|updated|stored|locked in|noted( down)?|added|changed|set)\b"
+    r"|\bgot (it|that|this|them|those|both|everything)\s+(all\s+)?"
+    r"(saved|logged|recorded|down|updated|locked in|noted|set)\b"
+    r"|\b(it'?s|that'?s|they'?re|both are|those are|now)\s+(been\s+)?"
+    r"(saved|logged|recorded|updated|stored|locked in)\b"
+    r"|^\W*(saved|logged|updated|all saved|done,? saved)\b"
+    r"|\b(saved|logged|recorded|updated|locked in) (it|that|them|those|both) (for you|as)\b"
+    r"|\d(\.\d+)?\s*(kg|kgs|h|hrs|g|cal|kcal|l)?\s+(noted|logged|saved)\b",
+    re.I | re.M,
+)
+
+
+def claims_a_save(text: str) -> bool:
+    return bool(_SAVE_CLAIM.search(text or ""))
 
 
 # "Dan wants me on 2200 cal", "set my calories to 900": a target, not a check-in
