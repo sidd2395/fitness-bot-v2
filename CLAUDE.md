@@ -31,7 +31,7 @@ A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
   Allowlist, duplicate update ids (`telegram_updates`), rate limit, text only,
   commands, consent (no user row until "I agree"), daily cap, then `run()`.
   `replies.py` holds its fixed replies, `mydata.py` the /mydata text,
-  `summary.py` the /summary table (HTML `<pre>`, from `stats.daily_history`,
+  `summary.py` the /summary list (30-character lines, from `stats.daily_history`,
   the same rows `get_history` returns), `api.py` the Bot API calls and
   message splitting.
 - `app/main.py`: FastAPI. `POST /telegram/webhook` (secret header or 401,
@@ -43,6 +43,8 @@ A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
   converts Railway's postgres://), `delete_user`, `migrate.upgrade_head`.
 - `alembic/versions/`: migrations. The test DB is built from these.
 - `test_local.py`: persona tests with real model calls, against `test.db`.
+  Every run appends a row to `eval_runs.csv` (committed): time, commit (+dirty),
+  models, coach.md hash, per-check results, totals and cost.
 
 ## How to run
 
@@ -111,7 +113,7 @@ persona dev).
 Phase 2, part 1 is built and passes the code-level checks, but hasn't been
 tried on a phone yet: Telegram layer, polling, webhook, allowlist, consent,
 /help /mydata /delete, 40 turns a day, 2s rate limit, JSON logs, Postgres URL.
-Not yet checked against a real Postgres.
+Migrations and delete_user are checked against a real Postgres (pgserver).
 
 ## Next: phase 2
 

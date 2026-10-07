@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Callable, Union
+from typing import Callable, Optional, Union
 
 ROOT = Path(__file__).resolve().parent
 TEST_DB = ROOT / "test.db"
@@ -2285,7 +2285,56 @@ def _sum(costs: list):
     return None if any(c is None for c in costs) else sum(costs)
 
 
-def print_cost_summary() -> None:
+EVAL_RUNS = ROOT / "eval_runs.csv"
+_EVAL_FIELDS = ["timestamp", "commit", "models", "coach_md_sha256", "only", "passed", "total",
+                "warnings", "cost_usd", "checks"]
+
+
+def _git_commit() -> str:
+    """HEAD, with +dirty when the working tree has changes, so a row says
+    exactly which code it scored."""
+    import subprocess
+    try:
+        head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=ROOT, capture_output=True,
+                              text=True, check=True).stdout.strip()
+        dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=ROOT,
+                               capture_output=True, text=True).stdout.strip()
+        return head + ("+dirty" if dirty else "")
+    except Exception:
+        return "unknown"
+
+
+def write_eval_row(rows: list, total_cost: Optional[float], only: Optional[list]) -> None:
+    """One row per run: when, which code and prompt, which models, every check's
+    result, and the cost. Committed, so scores can be compared across changes."""
+    import csv
+    import hashlib
+    import json
+    coach_md = (ROOT / "app" / "agent" / "prompts" / "coach.md").read_bytes()
+    blocking = [r for r in rows if _blocking(r)]
+    checks = {f"{r[0]}/{r[1].replace(WARN, '')}": ("pass" if r[2] else ("warn" if not _blocking(r) else "fail"))
+              for r in rows}
+    new_file = not EVAL_RUNS.exists()
+    with open(EVAL_RUNS, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=_EVAL_FIELDS)
+        if new_file:
+            writer.writeheader()
+        writer.writerow({
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "commit": _git_commit(),
+            "models": f"onboarding={MODEL_ONBOARDING};coach={MODEL_COACH}",
+            "coach_md_sha256": hashlib.sha256(coach_md).hexdigest()[:12],
+            "only": " ".join(only) if only else "all",
+            "passed": sum(r[2] for r in blocking),
+            "total": len(blocking),
+            "warnings": sum(1 for r in rows if not _blocking(r) and not r[2]),
+            "cost_usd": f"{total_cost:.4f}" if total_cost is not None else "",
+            "checks": json.dumps(checks, ensure_ascii=False, sort_keys=True),
+        })
+    print(f"\nAppended to {EVAL_RUNS.name}")
+
+
+def print_cost_summary() -> Optional[float]:
     print("\n" + "=" * 70)
     print("COST")
     print("=" * 70)
@@ -2308,7 +2357,8 @@ def print_cost_summary() -> None:
                 for k, v in counts.items():
                     acc[k] += v
 
-    print(f"Total: {_usd(_sum(list(persona_costs.values())))}")
+    total = _sum(list(persona_costs.values()))
+    print(f"Total: {_usd(total)}")
     print("\nPer persona:")
     for name, c in persona_costs.items():
         print(f"  {name:<10} {_usd(c)}")
@@ -2326,6 +2376,7 @@ def print_cost_summary() -> None:
     if missing:
         print(f"\nNo price set in app/pricing.py for: {', '.join(sorted(missing))}. "
               "Costs that need them show n/a.")
+    return total
 
 
 class Tee:
@@ -2377,7 +2428,8 @@ def main() -> None:
         rows.extend(run_persona(p))
 
     print_table(rows)
-    print_cost_summary()
+    total_cost = print_cost_summary()
+    write_eval_row(rows, total_cost, args.only)
     sys.stdout.flush()
     sys.stdout = sys.__stdout__
     out.close()
