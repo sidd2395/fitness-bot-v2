@@ -1889,6 +1889,31 @@ def _code_unbacked_save(db) -> CheckResult:
                 f"missed={misses}; false hits={false_hits}")
 
 
+def _code_note_end(db) -> CheckResult:
+    """One function says when a note ends: ends_on, else 7 days for a trip, else the
+    start day. remember defaults the follow-up to the day after the end."""
+    from app.agent.stats import note_end
+    t = date.today()
+    cases = {
+        "trip, no end": (note_end(t, None, "Work trip to Tokyo, hotel gym only"), t + timedelta(days=6)),
+        "event, no end": (note_end(t, None, "Cousin's wedding"), t),
+        "end given": (note_end(t, t + timedelta(days=2), "Holiday in Bali"), t + timedelta(days=2)),
+        "kind wins": (note_end(t, None, "Cousin's wedding", kind="trip"), t + timedelta(days=6)),
+        "undated": (note_end(None, None, "Likes morning runs"), None),
+    }
+    wrong = [k for k, (got, want) in cases.items() if got != want]
+    uid = _onboarded_user(db)
+    trip = dispatch("remember", {"text": "Work trip to Tokyo, hotel gym only",
+                                 "starts_on": str(t + timedelta(days=7))}, uid, 0, db)
+    set_by_model = dispatch("remember", {"text": "Cousin's wedding", "starts_on": str(t + timedelta(days=3)),
+                                         "follow_up_on": str(t + timedelta(days=5))}, uid, 0, db)
+    if trip.get("follow_up_on") != str(t + timedelta(days=14)):
+        wrong.append(f"trip follow-up {trip.get('follow_up_on')}")
+    if set_by_model.get("follow_up_on") != str(t + timedelta(days=5)):
+        wrong.append(f"model's follow-up replaced: {set_by_model.get('follow_up_on')}")
+    return not wrong, f"wrong: {wrong}"
+
+
 def _code_mydata_optional(db) -> CheckResult:
     """/mydata leaves out empty optional fields and explains when there are no targets."""
     from app.telegram.mydata import format_mydata
@@ -2198,6 +2223,7 @@ CODE_CHECKS = [
     ("weight change phrase built in code", _code_weight_words),
     ("sports named in a message are added in code", _code_sports),
     ("a reply can't claim a save no tool made", _code_unbacked_save),
+    ("note_end: 7-day trips, one-day events; follow-up defaults to the day after", _code_note_end),
     ("7-day trend phrase, and lead with it when today is the wrong way", _code_trend),
     ("weight steady for 3 weeks flagged once, only for weight goals", _code_steady),
     ("tips: one every 3 days at most, each kind once", _code_tips),

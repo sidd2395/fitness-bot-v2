@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Checkin, Note, RawMessage, User
 from app.agent.stats import (claim_milestone, claim_steady_weight, claim_tip, compute as compute_stats,
-                             describe_sleep_run, lead_with_trend, note_timing,
+                             describe_sleep_run, lead_with_trend, note_end_of, note_timing,
                              weight_change_since_last, weight_trend)
 from app import capabilities, clock
 from app.agent.tools import ONBOARDING_LABELS, ONBOARDING_STEPS
@@ -223,10 +223,10 @@ def _follow_up(note: Note) -> str:
 def _note_line(note: Note, today: date) -> str:
     """A note with its dates and where it stands today, worked out here."""
     line = f"- [{note.note_id}] {note.text}"
-    timing = note_timing(note.starts_on, note.ends_on, today)
+    end = note_end_of(note)
+    timing = note_timing(note.starts_on, end, today)
     if timing:
-        start = note.starts_on or note.ends_on
-        end = note.ends_on or note.starts_on
+        start = note.starts_on or end
         span = start.strftime("%a %d %b") + ("" if end == start else f" to {end.strftime('%a %d %b')}")
         line += f" ({span}: {timing})"
     return line + _follow_up(note)

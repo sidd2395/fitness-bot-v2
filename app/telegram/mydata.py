@@ -3,6 +3,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
+from app.agent.stats import note_end_of
 from app.agent.tools import ONBOARDING_STEPS
 from app.db.models import Checkin, RawMessage, User
 
@@ -46,7 +47,8 @@ def _checkin_line(c: Checkin) -> str:
 def _note_dates(n) -> str:
     bits = []
     if n.starts_on or n.ends_on:
-        start, end = n.starts_on or n.ends_on, n.ends_on or n.starts_on
+        end = note_end_of(n)
+        start = n.starts_on or end
         bits.append(str(start) if start == end else f"{start} to {end}")
     if n.follow_up_on:
         bits.append(f"follow up {n.follow_up_on}")

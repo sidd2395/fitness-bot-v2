@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Checkin, Issue, Note, Profile, RawMessage, User
 from app.agent.stats import (HISTORY_MAX_DAYS, claim_milestone, compute as compute_stats,
-                             daily_history, describe_sleep_run, lead_with_trend, note_timing,
+                             daily_history, describe_sleep_run, lead_with_trend, note_end, note_timing,
                              weight_change_since_last, weight_trend)
 
 CALORIE_FLOOR = {"M": 1500, "F": 1200}
@@ -1172,12 +1172,17 @@ def _remember(inp: dict, user_id: int, db: Session) -> dict:
             "Resolve one that no longer matters first."
         )}
 
+    # A dated note always gets a follow-up: the day after it ends, if the model
+    # didn't set one (a trip with no end counts as 7 days, see note_end)
+    end = note_end(starts_on, ends_on, text)
+    if follow_up_on is None and end is not None:
+        follow_up_on = end + timedelta(days=1)
     note = Note(user_id=user_id, text=text, follow_up_on=follow_up_on, starts_on=starts_on, ends_on=ends_on)
     db.add(note)
     db.commit()
     result = {"saved": True, "note_id": note.note_id,
               "follow_up_on": str(follow_up_on) if follow_up_on else None}
-    timing = note_timing(starts_on, ends_on, date.today())
+    timing = note_timing(starts_on, end, date.today())
     if timing:
         result["timing"] = timing
     return result

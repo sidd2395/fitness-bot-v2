@@ -1,4 +1,5 @@
 """Shared stats computed by code and handed to the model — never calculated by the AI."""
+import re
 from datetime import date, timedelta
 from typing import Optional
 from sqlalchemy.orm import Session
@@ -231,6 +232,29 @@ def claim_milestone(user_id: int, db: Session, today: date) -> Optional[str]:
     return MILESTONES[kinds[0]]
 
 
+TRIP_DEFAULT_DAYS = 7
+_TRIP_WORDS = re.compile(r"\b(trip|travel\w*|holiday|vacation|flight|flying|abroad|away|tour|getaway|"
+                         r"retreat|camp)\b", re.I)
+
+
+def note_end(starts_on: Optional[date], ends_on: Optional[date], text: str = "",
+             kind: Optional[str] = None) -> Optional[date]:
+    """The last day of a dated note, the one place this is worked out. ends_on if
+    given. With only a start: a trip lasts 7 days, anything else is a one-day
+    event. A trip is kind == "trip" once notes have a kind; until then, a note
+    whose text reads like one."""
+    if ends_on:
+        return ends_on
+    if not starts_on:
+        return None
+    is_trip = kind == "trip" if kind else bool(_TRIP_WORDS.search(text or ""))
+    return starts_on + timedelta(days=TRIP_DEFAULT_DAYS - 1) if is_trip else starts_on
+
+
+def note_end_of(note) -> Optional[date]:
+    return note_end(note.starts_on, note.ends_on, note.text, getattr(note, "kind", None))
+
+
 def note_timing(starts_on: Optional[date], ends_on: Optional[date], today: date) -> Optional[str]:
     """Where a dated note stands today, so the model never works it out from the
     text: upcoming in N days, happening now, or ended N days ago. None if undated."""
@@ -390,7 +414,7 @@ def claim_tip(user_id: int, db: Session, today: date) -> Optional[str]:
                 .order_by(Note.starts_on)
                 .all())
     for note in upcoming:
-        timing = note_timing(note.starts_on, note.ends_on, today)
+        timing = note_timing(note.starts_on, note_end_of(note), today)
         candidates.append((f"tip:event:{note.note_id}",
                            f'"{note.text}" is {timing}. If it fits this reply, offer a short '
                            "before-and-after plan for it."))
