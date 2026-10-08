@@ -21,9 +21,10 @@ A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
   Also the 7-day trend, "weight steady for 3 weeks", and rationed tips (one
   every 3 days, each kind once), stored in `nudges` as they're handed over.
 - `app/agent/prompts/coach.md`: the coach's voice.
-- `app/capabilities.py`: what Coach Bob can and can't do, with examples. /help,
-  the "all set" message, the Telegram command menu and the prompt's "What you
-  can help with" are built from it; change offers there only.
+- `app/capabilities.py`: the user-facing copy of what Coach Bob can and can't do
+  (Sid's wording, from docs/drafts/BOB_COPY_DRAFT.md): /help and its four
+  button sections, the end-of-onboarding message and its reminder buttons, the
+  command menu, and the prompt's "What you can help with". Change it there only.
 - `app/pricing.py`: price per million tokens for each model (input, output,
   cache read, cache write). Every model call logs its token counts
   (`event=usage`); `test_local.py` ends with a cost summary from these.
@@ -48,8 +49,8 @@ A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
 
 ## How to run
 
-- `python3 test_local.py`: every persona, Haiku onboarding plus Sonnet coaching,
-  written to `test_output_split.txt`
+- `python3 test_local.py`: every persona, Sonnet for onboarding and coaching
+  (`MODEL_ONBOARDING`, `MODEL_COACH`), written to `test_output_split.txt`
 - `--only <persona> [<persona> ...]`: only those personas. `--only code`: code-level checks only, no
   model calls. `--list`: list personas.
 - `--model haiku|sonnet|<model id>`: one model for everything, written to

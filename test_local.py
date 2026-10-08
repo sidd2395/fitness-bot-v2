@@ -446,9 +446,30 @@ _PROMISE_RE = re.compile(
 
 
 def no_promise_to_message_first(ctx: Ctx) -> CheckResult:
-    """The bot only replies, so no reply promises to message or check in later."""
-    bad = [(s.message, m.group(0)) for s in ctx.sent for m in _PROMISE_RE.finditer(s.reply)]
+    """No reply promises to message or check in later. The fixed end-of-onboarding
+    copy offers check-ins with buttons, so it's left out. A warning until Part B,
+    where the context block's next check-in line decides what may be promised."""
+    bad = [(s.message, m.group(0)) for s in ctx.sent
+           for m in _PROMISE_RE.finditer(s.reply.replace(ONBOARDED_REPLY, ""))]
     return not bad, f"promises: {bad}"
+
+
+_STOCK_PRAISE = re.compile(r"\b(great goal|thanks for sharing|that'?s (a )?great|love that|awesome|amazing|"
+                           r"fantastic|good for you)\b", re.I)
+
+
+def onboarding_no_stock_praise(ctx: Ctx) -> CheckResult:
+    """Onboarding reacts to what they said, never with stock praise."""
+    bad = [(s.message, m.group(0)) for s in ctx.sent if not s.onboarded_before
+           for m in _STOCK_PRAISE.finditer(s.reply)]
+    return not bad, f"stock praise: {bad}"
+
+
+def onboarding_one_question(ctx: Ctx) -> CheckResult:
+    """Every onboarding message asks at most one question."""
+    bad = [(s.message, s.reply.count("?")) for s in ctx.sent
+           if not s.onboarded_before and s.reply.count("?") > 1]
+    return not bad, f"(message, question marks): {bad}"
 
 
 # A check whose label starts with WARN is reported but doesn't fail the run:
@@ -468,7 +489,9 @@ COMMON_CHECKS = [
     ("no check-in saved before onboarding completes", no_checkin_during_onboarding),
     ("no reply repeats the same 6-word run", no_repeated_runs),
     ("no reply has more than one question mark", one_question_at_most),
-    ("no reply promises to message first or says it checks in", no_promise_to_message_first),
+    (WARN + "no reply promises to message first or says it checks in", no_promise_to_message_first),
+    ("onboarding: no stock praise", onboarding_no_stock_praise),
+    ("onboarding: at most one question mark per message", onboarding_one_question),
 ]
 
 
@@ -1827,24 +1850,39 @@ def _code_tips(db) -> CheckResult:
 
 
 def _code_help_and_all_set(db) -> CheckResult:
-    """/help and the all-set message come from capabilities.py: 3 examples to try,
-    every command, every example; the command menu sends the same commands."""
+    """/help, its four sections, the all-set message and the command menu come from
+    capabilities.py; sections fit one message with no questions; the buttons work
+    through the handler, and the all-set buttons save the reminder choice."""
     from app import capabilities
     from app.telegram.api import TelegramAPI
-    examples = [c.example for c in capabilities.CAN if c.group not in ("Sharing with your PT", "Your data")]
-    tries = [l for l in ONBOARDED_REPLY.splitlines() if l.startswith("• ")]
     wrong = []
-    if tg_replies.HELP != capabilities.help_text():
-        wrong.append("HELP isn't help_text()")
-    wrong += [f"/help missing {e!r}" for e in examples if e not in tg_replies.HELP]
-    wrong += [f"/help missing /{c}" for c in capabilities.COMMANDS if c != "help" and f"/{c}" not in tg_replies.HELP]
-    if len(tries) != 3 or not ONBOARDED_REPLY.endswith("Type /help anytime."):
-        wrong.append(f"all set has {len(tries)} examples")
+    if tg_replies.HELP != capabilities.HELP_MAIN or ONBOARDED_REPLY != capabilities.ALL_SET:
+        wrong.append("HELP or all-set not from capabilities.py")
+    for key, (label, text) in capabilities.HELP_SECTIONS.items():
+        if "?" in text or len(text) > 4096:
+            wrong.append(f"section {label!r}")
     http = FakeHTTP(True)
     TelegramAPI(token="1:x", http=http).set_commands(capabilities.COMMANDS)
-    sent = [c["command"] for c in http.requests[0][1]["commands"]]
-    if sent != ["help", "summary", "mydata", "delete"] or not http.requests[0][0].endswith("/setMyCommands"):
-        wrong.append(f"menu sent {sent}")
+    if [c["command"] for c in http.requests[0][1]["commands"]] != list(capabilities.COMMANDS):
+        wrong.append("menu")
+    chat = "5550300"
+    with _telegram(chat) as t:
+        t.send(_tg_tap(chat, "consent"), db)
+        t.send(_tg_text(chat, "/help"), db)
+        help_buttons = t.api.sent[-1][2]
+        t.send(_tg_tap(chat, "help:tell"), db)
+        tell = t.api.texts(chat)[-1]
+        t.send(_tg_tap(chat, "remind:morning"), db)
+        confirm = t.api.texts(chat)[-1]
+    user = _tg_user(db, chat)
+    if [b[1] for row in help_buttons for b in row] != [f"help:{k}" for k in capabilities.HELP_SECTIONS]:
+        wrong.append(f"help buttons {help_buttons}")
+    if tell != capabilities.HELP_SECTIONS["tell"][1]:
+        wrong.append("help:tell sent the wrong text")
+    if user.reminders != "morning" or confirm != tg_replies.REMINDERS_SET["morning"]:
+        wrong.append(f"reminders={user.reminders!r}, reply={confirm!r}")
+    if ONBOARDED_REPLY.count("?") != 1 or "/help" not in ONBOARDED_REPLY:
+        wrong.append("all-set")
     return not wrong, f"wrong: {wrong}"
 
 

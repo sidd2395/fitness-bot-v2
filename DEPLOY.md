@@ -23,7 +23,7 @@ pins every package. Migrations run when the app starts.
 | `TELEGRAM_BOT_TOKEN` | from BotFather |
 | `TELEGRAM_WEBHOOK_SECRET` | a long random string; the same value goes in your local `.env` for `set_webhook.py` |
 | `ALLOWED_TELEGRAM_IDS` | Telegram user ids, comma separated. Empty means nobody gets in. |
-| `MODEL_ONBOARDING` | `claude-haiku-4-5-20251001` |
+| `MODEL_ONBOARDING` | `claude-sonnet-5` |
 | `MODEL_COACH` | `claude-sonnet-5` |
 | `TZ` | `Asia/Singapore` (check-in dates use the server's local date) |
 | `LOG_FORMAT` | optional; logs are JSON on Railway anyway (`RAILWAY_ENVIRONMENT` is set there) |

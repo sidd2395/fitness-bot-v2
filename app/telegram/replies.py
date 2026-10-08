@@ -13,7 +13,10 @@ CONSENT_NOTICE = (
     "Tap \"I agree\" to start."
 )
 AGREE_BUTTON = ("I agree", "consent")
-AFTER_CONSENT = "Thanks. To start, what's your first name?"
+AFTER_CONSENT = (
+    "Good to have you. I'm Bob. A few quick questions so I can coach you properly, "
+    "two minutes tops. First up, what should I call you?"
+)
 
 NOT_ALLOWED = "Coach Bob is in private beta."
 TEXT_ONLY = "I can only read text for now."
@@ -26,6 +29,18 @@ ERROR_REPLY = "Sorry, something went wrong on my side. Try sending that again in
 UNKNOWN_COMMAND = "I don't know that command. /help lists what I can do."
 
 HELP = help_text()
+
+# /reminders and the end-of-onboarding buttons (copy: docs/drafts/BOB_COPY_DRAFT.md)
+REMINDERS_STATUS = ("Right now I check in at {when}, only when I haven't heard from you.")
+REMINDERS_WHEN = {"both": "10am and 9pm", "morning": "10am", "off": "never"}
+REMINDERS_BUTTONS = [[("Morning and night", "remind:both"), ("Just mornings", "remind:morning")],
+                     [("Pause 7 days", "remind:pause"), ("Off", "remind:off")]]
+REMINDERS_SET = {
+    "both": "Done. 10am and 9pm, only if I haven't heard from you.",
+    "morning": "Done. Just 10am from now on.",
+    "pause": "Paused until {date}. I'll be here if you message before then.",
+    "off": "Off. I won't message first. Turn it back on with /reminders anytime.",
+}
 
 DELETE_CONFIRM = (
     "This erases everything I hold about you: your profile, check-ins, notes, "

@@ -20,3 +20,7 @@
 - Trip timing is sometimes stated wrong although the note shows its status in
   code (rohan, trip started yesterday: "heading into Thailand this weekend").
   rohan checks it as a warning, not a failure.
+- Onboarding (Sonnet) sometimes uses filler acknowledgements between questions:
+  "Thanks for that", "Got it, 34 and female, noted", "Good to know". No stock
+  praise, and the "why now" reaction lands well. Style; revisit if it reads
+  robotic on a phone.

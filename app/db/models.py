@@ -26,6 +26,8 @@ class User(Base):
     # Under 18. Personal data is cleared; every message gets a fixed reply, no model call
     blocked          = Column(Boolean, default=False, nullable=False)
     summary_used_at  = Column(DateTime, nullable=True)   # last /summary, so its tip isn't offered after
+    reminders        = Column(String, default="off", server_default="off", nullable=False)  # both | morning | off
+    paused_until     = Column(Date, nullable=True)       # no check-ins from us until after this day
 
     # Deleting a user deletes everything they own (PDPA delete command)
     profile      = relationship("Profile",    uselist=False, back_populates="user",

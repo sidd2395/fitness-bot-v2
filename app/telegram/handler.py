@@ -15,7 +15,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.agent.loop import run
-from app.capabilities import COMMANDS
+from app import clock
+from app.capabilities import ALL_SET, ALL_SET_BUTTONS, COMMANDS, help_buttons, help_section
 from app.clock import day_start_utc
 from app.db import delete_user
 from app.db.models import RawMessage, TelegramUpdate, User
@@ -172,7 +173,10 @@ def _handle(update: dict, api, db: Session) -> None:
         pass  # cosmetic
     started = time.monotonic()
     reply = run(user.user_id, text, db)
-    api.send_message(chat_id, reply)
+    # The end of onboarding asks whether we may check in: its three buttons
+    buttons = ([[(label, f"remind:{setting}")] for label, setting in ALL_SET_BUTTONS]
+               if ALL_SET in reply else None)
+    api.send_message(chat_id, reply, buttons=buttons)
     _log("replied", user, latency_ms=round((time.monotonic() - started) * 1000))
 
 
@@ -185,9 +189,9 @@ def _on_command(text: str, chat_id: str, user: Optional[User], api, db: Session)
         if user is None or (user.consent_given_at is None and not user.blocked):
             api.send_message(chat_id, replies.CONSENT_NOTICE, buttons=[replies.AGREE_BUTTON])
         else:
-            api.send_message(chat_id, replies.HELP)
+            api.send_message(chat_id, replies.HELP, buttons=help_buttons())
     elif command == "/help":
-        api.send_message(chat_id, replies.HELP)
+        api.send_message(chat_id, replies.HELP, buttons=help_buttons())
     elif command == "/summary":
         parts = text.split()
         days = parse_days(parts[1] if len(parts) > 1 else None)
@@ -239,6 +243,33 @@ def _on_button(callback: dict, chat_id: str, user: Optional[User], api, db: Sess
     elif data == "delete_no":
         _clear(api, chat_id, message_id)
         api.send_message(chat_id, replies.DELETE_CANCELLED)
+    elif data and data.startswith("help:"):
+        # Buttons stay, so they can open another section
+        section = help_section(data.split(":", 1)[1])
+        if section:
+            api.send_message(chat_id, section)
+    elif data and data.startswith("remind:"):
+        if user is None or user.blocked or user.consent_given_at is None:
+            return
+        _clear(api, chat_id, message_id)
+        api.send_message(chat_id, set_reminders(user, data.split(":", 1)[1], db))
+
+
+def set_reminders(user: User, choice: str, db: Session) -> str:
+    """both | morning | off, or pause for 7 days. Returns the confirmation to send."""
+    if choice == "pause":
+        until = clock.now_local().date() + timedelta(days=7)
+        user.paused_until = until
+        db.commit()
+        _log("reminders_paused", user)
+        return replies.REMINDERS_SET["pause"].format(date=f"{until:%a} {until.day} {until:%b}")
+    if choice not in ("both", "morning", "off"):
+        return replies.UNKNOWN_COMMAND
+    user.reminders = choice
+    user.paused_until = None
+    db.commit()
+    _log(f"reminders_{choice}", user)
+    return replies.REMINDERS_SET[choice]
 
 
 def _clear(api, chat_id: str, message_id: Optional[int]) -> None:

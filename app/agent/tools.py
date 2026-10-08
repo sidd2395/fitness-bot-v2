@@ -611,7 +611,7 @@ def _add_refusals(result: dict, rejected: dict, needs_confirmation: dict) -> Non
 
 ONBOARDING_LABELS = {
     0: "name",
-    1: "age",
+    1: "age and sex",
     2: "sex",
     3: "current weight",
     4: "main goal",
@@ -765,7 +765,10 @@ def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict
     # from the message, so an under-18 answer is never missed.
     age_in = inp.get("age")
     if age_in in (None, "") and user.onboarding_step == 1:
-        age_in = raw_body if parse_number(raw_body) is not None else None
+        # Age and sex share one question, so the answer may be "34, male" or
+        # "I'm sixteen": one number in the message is the age
+        found = _numbers(raw_body)
+        age_in = found[0] if len(found) == 1 else None
     if age_in not in (None, ""):
         age = parse_number(age_in)
         if age is None or age != int(age) or not 0 < age < 120:
@@ -789,6 +792,11 @@ def _save_profile(inp: dict, user_id: int, raw_msg_id: int, db: Session) -> dict
             user.name = name.title() if name.islower() else name
             saved["name"] = user.name
 
+    if not inp.get("sex") and user.onboarding_step in (1, 2) and not user.sex:
+        # Read from the message when the model left it out ("34, male", "f")
+        word = re.search(r"\b(male|female|man|woman|guy|girl|m|f)\b", raw_body, re.I)
+        if word:
+            inp = {**inp, "sex": word.group(1)}
     if inp.get("sex"):
         sex = _SEX_WORDS.get(str(inp["sex"]).strip().lower())
         if sex is None:

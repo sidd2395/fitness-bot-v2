@@ -19,8 +19,8 @@ from app.pricing import cost_usd, usage_counts
 
 load_dotenv()
 
-# Onboarding is short, scripted questions: the cheap model. Coaching is the product.
-MODEL_ONBOARDING = os.environ.get("MODEL_ONBOARDING") or "claude-haiku-4-5-20251001"
+# Onboarding is the first impression and sets the voice, so it gets the coaching model too
+MODEL_ONBOARDING = os.environ.get("MODEL_ONBOARDING") or "claude-sonnet-5"
 MODEL_COACH = os.environ.get("MODEL_COACH") or "claude-sonnet-5"
 MAX_TOOL_CALLS = 4
 # Onboarding is offered save_profile and nothing else, so a check-in sent

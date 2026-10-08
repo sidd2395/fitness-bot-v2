@@ -33,16 +33,18 @@ class TelegramAPI:
             raise TelegramError(method, data.get("error_code"), data.get("description", ""))
         return data["result"]
 
-    def send_message(self, chat_id: str, text: str,
-                     buttons: Optional[list[tuple[str, str]]] = None) -> None:
-        """Sends text, split if it's over Telegram's limit. Buttons, as
-        (label, callback data) pairs in one row, go on the last part."""
+    def send_message(self, chat_id: str, text: str, buttons: Optional[list] = None) -> None:
+        """Sends text, split if it's over Telegram's limit. Buttons go on the last
+        part: (label, callback data) pairs, either one row or a list of rows."""
         parts = split_message(text)
+        rows = None
+        if buttons:
+            rows = buttons if isinstance(buttons[0], list) else [buttons]
         for i, part in enumerate(parts):
             params = {"chat_id": chat_id, "text": part}
-            if buttons and i == len(parts) - 1:
+            if rows and i == len(parts) - 1:
                 params["reply_markup"] = {"inline_keyboard": [
-                    [{"text": label, "callback_data": data} for label, data in buttons]
+                    [{"text": label, "callback_data": data} for label, data in row] for row in rows
                 ]}
             self.call("sendMessage", **params)
 
