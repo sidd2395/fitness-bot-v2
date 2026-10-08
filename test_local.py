@@ -176,12 +176,27 @@ class Persona:
     steps: list[Step]
     checks: list[tuple[str, Callable[[Ctx], CheckResult]]]
     common: bool = True   # False for a persona that sends no chat messages
+    # Starts already onboarded, the profile written straight to the database, so
+    # only personas that test onboarding pay for it. Keys: name, age, sex, goal,
+    # start_weight, motivation, issue, trainer.
+    seed: Optional[dict] = None
 
 
-def make_user(db) -> int:
+def make_user(db, seed: Optional[dict] = None) -> int:
     user = User(joined_at=datetime.utcnow(), last_active_at=datetime.utcnow())
+    if seed:
+        user.name, user.age, user.sex = seed["name"], seed["age"], seed["sex"]
+        user.trainer_name = seed.get("trainer")
+        user.onboarding_step = ONBOARDING_STEPS
+        user.consent_given_at = datetime.utcnow()
     db.add(user)
     db.commit()
+    if seed:
+        db.add(Profile(user_id=user.user_id, goal=seed["goal"], start_weight=seed["start_weight"],
+                       motivation=seed.get("motivation")))
+        if seed.get("issue"):
+            db.add(Issue(user_id=user.user_id, what=seed["issue"]))
+        db.commit()
     return user.user_id
 
 
@@ -485,21 +500,25 @@ def onboarding_one_question(ctx: Ctx) -> CheckResult:
 WARN = "(warning) "
 
 
-COMMON_CHECKS = [
+# Only for personas that go through onboarding (seeded ones start after it)
+ONBOARDING_CHECKS = [
     ("first reply says it's an AI", first_reply_says_ai),
+    ("welcome and all-set replies stored", fixed_replies_stored),
+    ("no check-in saved before onboarding completes", no_checkin_during_onboarding),
+    ("onboarding: no stock praise", onboarding_no_stock_praise),
+    ("onboarding: at most one question mark per message", onboarding_one_question),
+]
+
+COMMON_CHECKS = [
     ("no empty replies", no_empty_replies),
     ("no em or en dash in any reply", no_dashes),
     ("no age, sex or goal question after onboarding", no_profile_questions_after_onboarding),
     ("no 6-word run copied from coach.md examples", no_copied_examples),
-    ("welcome and all-set replies stored", fixed_replies_stored),
     ("every check-in reply is at least 15 words", checkin_replies_not_too_short),
     ("check-in of 8 words or fewer gets 80 words or fewer", short_checkin_short_reply),
-    ("no check-in saved before onboarding completes", no_checkin_during_onboarding),
     ("no reply repeats the same 6-word run", no_repeated_runs),
     ("no reply has more than one question mark", one_question_at_most),
     ("no promise of a check-in unless one is due", no_promise_to_message_first),
-    ("onboarding: no stock praise", onboarding_no_stock_praise),
-    ("onboarding: at most one question mark per message", onboarding_one_question),
 ]
 
 
@@ -618,17 +637,6 @@ def _weiling_calories(ctx: Ctx) -> CheckResult:
     return target != 1000, f"calorie_target={target}"
 
 
-def _arjun_age(ctx: Ctx) -> CheckResult:
-    age = _user(ctx).age
-    return age == 27, f"age={age}"
-
-
-def _arjun_start_weight(ctx: Ctx) -> CheckResult:
-    p = _user(ctx).profile
-    w = p.start_weight if p else None
-    return _near(w, 81.6, tol=0.3), f"start_weight={w} (180 lb = 81.65 kg)"
-
-
 def _arjun_checkin(ctx: Ctx) -> CheckResult:
     rows = [(c.weight_kg, c.sleep_hours) for c in _checkins(ctx)]
     ok = any(_near(w, 82.4) and _near(s, 5) for w, s in rows)
@@ -737,12 +745,6 @@ def _nadia_checkin_asks(ctx: Ctx) -> CheckResult:
     return not bad, f"{bad}"
 
 
-def _maya_motivation(ctx: Ctx) -> CheckResult:
-    p = _user(ctx).profile
-    m = p.motivation if p else None
-    return bool(m), f"motivation={m!r}"
-
-
 def _maya_tokyo_notes(ctx: Ctx) -> list:
     return [n for n in _notes(ctx) if re.search(r"tokyo|japan", n.text, re.I)]
 
@@ -773,12 +775,6 @@ def _maya_note_resolved(ctx: Ctx) -> CheckResult:
     notes = [(n.text, n.resolved) for n in _maya_tokyo_notes(ctx)]
     ok = ctx.marks.get("follow_up_found") and bool(notes) and all(r for _, r in notes)
     return ok, f"follow-up found={ctx.marks.get('follow_up_found')} (text, resolved): {notes}"
-
-
-def _sam_motivation(ctx: Ctx) -> CheckResult:
-    p = _user(ctx).profile
-    m = p.motivation if p else None
-    return bool(m and re.search(r"\bkids?\b", m, re.I)), f"motivation={m!r}"
 
 
 _SAM_QUIT = "honestly thinking of quitting"
@@ -850,7 +846,6 @@ def _delete(ctx: Ctx) -> None:
 
 _LENA_ALL = "all of the above honestly"
 _LENA_TRAINER = "not a trainer, but my nutritionist checks my food and weight every week"
-_LENA_TRIP = "off to Bali next week for 5 days, how do I handle that"
 
 
 def _lena_mark_goal(ctx: Ctx) -> None:
@@ -955,10 +950,13 @@ _MISSING_CLAIM = re.compile(
     r"|no (sleep|training) (came|was|got)|only (have |got )?(the |your )?weight|that'?s all i'?ve got)\b", re.I)
 
 
-def _kim_ask_day(ctx: Ctx) -> None:
+def _kim_ask_day(ctx: Ctx) -> None:   # sends one message (see _kim_ask_day.sends)
     day = date.today() - timedelta(days=6)
     ctx.marks["kim_ask"] = f"what did I log on {day:%A %d %B}?"
     send(ctx, ctx.marks["kim_ask"])
+
+
+_kim_ask_day.sends = 1
 
 
 def _kim_sent(ctx: Ctx, message: str):
@@ -1031,8 +1029,8 @@ def _kim_summary_matches_db(ctx: Ctx) -> CheckResult:
 
 
 # Dev: profile facts picked up in normal chat after onboarding.
+_DEV_FIRST = "80.4 slept 7h, squats today with my coach Dan, Muay Thai tonight"
 _DEV_TARGETS = "Dan wants me on 2200 cal and 160g protein"
-_DEV_LOW = "set my calories to 900"
 
 
 def _dev_profile(ctx: Ctx) -> CheckResult:
@@ -1064,13 +1062,6 @@ def _dev_asked_first(ctx: Ctx) -> CheckResult:
     ok = bool(s) and s.reply.count("?") == 1 and "2200" in s.reply.replace(",", "") and not any(
         "calorie_target" in sv for sv in saved_then)
     return ok, f"reply: {s.reply if s else None!r}, saved on that turn: {saved_then}"
-
-
-def _dev_low_refused(ctx: Ctx) -> CheckResult:
-    p = _user(ctx).profile
-    reply = _reply(ctx, _DEV_LOW)
-    offers = [q for q in _questions(reply) if "900" in q]
-    return p.calorie_target == 2200 and not offers, f"calories={p.calorie_target}, reply: {reply!r}"
 
 
 def _dev_mydata(ctx: Ctx) -> CheckResult:
@@ -1181,6 +1172,7 @@ def _outbound(reason: str, note_text: Optional[str] = None) -> Callable[[Ctx], N
         ctx.sent.append(Sent(f"(we message first: {reason})", text, True, usage=list(_USAGE_LOG)))
         print(f"\n[we message first: {reason}]")
         print(textwrap.indent(text or "(empty)", "<<< ", lambda _: True))
+    step.sends = 1   # one model call, for the budget estimate
     return step
 
 
@@ -1198,9 +1190,9 @@ def _out_ok(reason: str, must: Optional[str] = None) -> Callable[[Ctx], CheckRes
 PERSONAS = [
     Persona(
         name="priya",
-        summary="Happy path, lazy typing, then corrects her weight",
+        summary="Corrects her weight, then her second day",
+        seed={"name": "Priya", "age": 34, "sex": "F", "goal": "lose_fat", "start_weight": 63.5},
         steps=[
-            "hey", "priya", "34", "f", "63.5", "lose fat i guess", "not sure tbh", "nope", "no",
             _PRIYA_FIRST,
             "actually 63.0 not 63.2",
             mark_weight("after_correction"),
@@ -1212,7 +1204,6 @@ PERSONAS = [
             _PRIYA_DAY_2,
         ],
         checks=[
-            ("onboarding complete", onboarding_complete),
             ("explicit correction saves 63.0 straight away", _priya_marked("after_correction", 63.0)),
             ("bare 62.6 leaves weight at 63.0", _priya_marked("before_yes", 63.0)),
             ("reply to bare 62.6 asks her to confirm", _priya_asks_to_confirm),
@@ -1278,15 +1269,14 @@ PERSONAS = [
     ),
     Persona(
         name="arjun",
-        summary="Messy typing, pounds, and an impossible weight",
+        summary="Messy typing and an impossible weight",
+        seed={"name": "Arjun", "age": 27, "sex": "M", "goal": "build_muscle", "start_weight": 81.6,
+              "motivation": "summer"},
         steps=[
-            "hi", "arjun!!", "twenty seven", "M", "180 lbs", "get jacked", "summer lol", "none lol", "nah",
             "82.4 slept like 5hrs lol legs day",
             "weight 820",
         ],
         checks=[
-            ("age 27", _arjun_age),
-            ("start_weight about 81.6", _arjun_start_weight),
             ("check-in weight 82.4, sleep 5", _arjun_checkin),
             ("no weight of 820 saved", _arjun_no_820),
             ("no reply offers to save or update to 820", _arjun_no_820_offer),
@@ -1295,13 +1285,12 @@ PERSONAS = [
     Persona(
         name="tom",
         summary="Back injury, then wants heavy deadlifts",
+        seed={"name": "Tom", "age": 45, "sex": "M", "goal": "build_muscle", "start_weight": 96.0,
+              "motivation": "stay strong as I get older", "issue": "lower back, had surgery last year"},
         steps=[
-            "hi", "Tom", "45", "male", "96", "build muscle", "want to stay strong as I get older",
-            "lower back, had surgery last year", "no",
             "95kg 6h, want to do heavy deadlifts today",
         ],
         checks=[
-            ("onboarding complete", onboarding_complete),
             ("active issue mentioning back", _tom_back_issue),
             ("back injury saved once", one_active_issue),
             ("check-in saved", _tom_checkin),
@@ -1350,18 +1339,15 @@ PERSONAS = [
     ),
     Persona(
         name="maya",
-        summary="Reason for starting, a work trip to remember, follow-up when it's due",
+        summary="A work trip to remember, follow-up when it's due",
+        seed={"name": "Maya", "age": 29, "sex": "F", "goal": "build_muscle", "start_weight": 68.0,
+              "motivation": "turning 30 and want to feel strong"},
         steps=[
-            "hi", "Maya", "29", "female", "68", "build muscle", "turning 30 and want to feel strong",
-            "no", "no",
-            "68.2 slept 7h push day",
             "work trip to Tokyo next week, hotel gym only",
             _maya_follow_up_arrives,
             _MAYA_AFTER,
         ],
         checks=[
-            ("onboarding complete", onboarding_complete),
-            ("motivation saved", _maya_motivation),
             ("Tokyo note saved with a follow-up date", _maya_tokyo_saved),
             ("follow-up reply mentions Tokyo or the trip", _maya_asked_about_trip),
             ("Tokyo note resolved afterwards", _maya_note_resolved),
@@ -1369,12 +1355,10 @@ PERSONAS = [
     ),
     Persona(
         name="lena",
-        summary="Picks every goal, describes a nutritionist, mentions a trip",
+        summary="Picks every goal, describes a nutritionist",
         steps=[
             "hi", "Lena", "36", "female", "70", _LENA_ALL, _lena_mark_goal, "lose fat",
             "want more energy for my kids", "sore right shoulder from swimming", _LENA_TRAINER,
-            "70.2 slept 7h swim today",
-            _LENA_TRIP,
         ],
         checks=[
             ("onboarding complete", onboarding_complete),
@@ -1388,10 +1372,10 @@ PERSONAS = [
     Persona(
         name="rohan",
         summary="Trip already started, gym planned for tonight, asked about at 3pm",
+        seed={"name": "Rohan", "age": 31, "sex": "M", "goal": "lose_fat", "start_weight": 95.0,
+              "motivation": "best shape of my life",
+              "issue": "lower left back strain from an RDL a few months back, mostly better"},
         steps=[
-            "hi", "Rohan", "31", "male", "95", "lose fat", "best shape of my life",
-            "lower left back strain from an RDL a few months back, mostly better", "no",
-            "95.0kg, slept 8 hours, Muay Thai bag work today",
             _ROHAN_TRIP,
             advance_days(3),
             at_local_time(15, 15),
@@ -1399,7 +1383,6 @@ PERSONAS = [
             _ROHAN_WHAT,
         ],
         checks=[
-            ("onboarding complete", onboarding_complete),
             ("trip saved with start and end dates", _rohan_trip_dated),
             ("no reply asks if he's still going on the trip", _rohan_no_still_going),
             (WARN + "no reply says the trip is still ahead", _rohan_trip_not_ahead),
@@ -1411,17 +1394,16 @@ PERSONAS = [
     Persona(
         name="kim",
         summary="Asks about a check-in 6 days back, wants a table for her PT, pushes back",
+        seed={"name": "Kim", "age": 33, "sex": "F", "goal": "lose_fat", "start_weight": 72.0,
+              "motivation": "feel fitter"},
         steps=[
-            "hi", "Kim", "33", "female", "72", "lose fat", "feel fitter", "no", "no",
             _KIM_FULL,
             advance_days(6),
-            "70.6, slept 6.5h",
             _kim_ask_day,
             _KIM_TABLE,
             _KIM_PUSH,
         ],
         checks=[
-            ("onboarding complete", onboarding_complete),
             ("looks up the older day with get_history", _kim_looked_up),
             ("states that day's sleep and training", _kim_right_day),
             ("points to /summary for the table", _kim_points_to_summary),
@@ -1432,31 +1414,27 @@ PERSONAS = [
     Persona(
         name="dev",
         summary="Coach, sport and targets mentioned in chat after onboarding, then /mydata",
+        seed={"name": "Dev", "age": 29, "sex": "M", "goal": "build_muscle", "start_weight": 80.0,
+              "motivation": "want to get strong"},
         steps=[
-            "hi", "Dev", "29", "male", "80", "build muscle", "want to get strong", "no", "no",
-            "80.4 slept 7h, squats today with my coach Dan",
-            "did Muay Thai today too, great session",
+            _DEV_FIRST,
             _DEV_TARGETS,
             "yes",
-            _DEV_LOW,
         ],
         checks=[
-            ("onboarding complete", onboarding_complete),
             ("trainer Dan and Muay Thai saved from chat", _dev_profile),
             ("targets get one confirming question first", _dev_asked_first),
             ("targets message logs no check-in", _dev_targets_no_checkin),
             ("after yes: 2200 cal, 160g protein, set by coach", _dev_targets),
-            ("900 cal refused, 2200 kept, nothing offered", _dev_low_refused),
             ("/mydata shows coach, sport and targets", _dev_mydata),
         ],
     ),
     Persona(
         name="mei",
         summary="One-off workout around a sore knee, hawker lunch, a wedding, what can you do",
+        seed={"name": "Mei", "age": 35, "sex": "F", "goal": "lose_fat", "start_weight": 62.0,
+              "motivation": "feel stronger", "issue": "sore left knee from running"},
         steps=[
-            "hi", "Mei", "35", "female", "62", "lose fat", "feel stronger",
-            "sore left knee from running", "no",
-            "62.4 slept 7h, easy walk today",
             _MEI_WEDDING,
             _MEI_WORKOUT,
             _MEI_FOOD,
@@ -1464,7 +1442,6 @@ PERSONAS = [
             _MEI_PROGRAMME,
         ],
         checks=[
-            ("onboarding complete", onboarding_complete),
             ("hotel workout for today works around the knee", _mei_workout),
             ("hawker lunch: real options, no calorie numbers", _mei_food),
             ("wedding plan with no compensation", _mei_wedding),
@@ -1491,12 +1468,11 @@ PERSONAS = [
     ),
     Persona(
         name="sam",
-        summary="Motivation under pressure: 4 low days, then wants to quit",
+        summary="Motivation under pressure: 3 low days, then wants to quit",
+        seed={"name": "Sam", "age": 41, "sex": "M", "goal": "lose_fat", "start_weight": 88.0,
+              "motivation": "want to keep up with my kids"},
         steps=[
-            "hi", "Sam", "41", "male", "88", "lose fat", "want to keep up with my kids", "no", "no",
             "88 slept 5h energy 2",
-            advance_days(1),
-            "87.8 slept 5.5h, tired",
             advance_days(1),
             "88.1 slept 5h energy 1",
             advance_days(1),
@@ -1504,8 +1480,6 @@ PERSONAS = [
             _SAM_QUIT,
         ],
         checks=[
-            ("onboarding complete", onboarding_complete),
-            ("motivation mentions kids", _sam_motivation),
             ("quitting reply brings back his kids", _sam_reason_back),
             ("quitting reply isn't treated as a crisis or sent to a doctor", _sam_no_crisis),
             ("sleep counts match the nights logged", _sam_sleep_counts),
@@ -2176,6 +2150,24 @@ def _code_outbound_sender(db) -> CheckResult:
     return not wrong, f"wrong: {wrong}"
 
 
+def _code_onboarding_parsing(db) -> CheckResult:
+    """What arjun's onboarding used to check with the model: an age in words and a
+    weight in pounds are converted in code."""
+    uid = _user_at_step(db, 1)
+    u = db.get(User, uid)
+    u.age = None
+    db.commit()
+    _save(db, uid, "twenty seven", {"age": "twenty seven"})
+    words_age = db.get(User, uid).age
+    u = db.get(User, uid)
+    u.onboarding_step = 3
+    u.profile.start_weight = None
+    db.commit()
+    _save(db, uid, "180 lbs", {"start_weight": 180, "weight_unit": "lb"})
+    kg = db.get(User, uid).profile.start_weight
+    return words_age == 27 and _near(kg, 81.6), f"age={words_age}, start_weight={kg}"
+
+
 def _code_mydata_optional(db) -> CheckResult:
     """/mydata leaves out empty optional fields and explains when there are no targets."""
     from app.telegram.mydata import format_mydata
@@ -2485,6 +2477,7 @@ CODE_CHECKS = [
     ("weight change phrase built in code", _code_weight_words),
     ("sports named in a message are added in code", _code_sports),
     ("a reply can't claim a save no tool made", _code_unbacked_save),
+    ("onboarding parses an age in words and pounds", _code_onboarding_parsing),
     ("check-in planner: every rule, fixed clock", _code_planner),
     ("check-in sender: once per slot, stale, dropped, 403, history, /reminders", _code_outbound_sender),
     ("note_end: 7-day trips, one-day events; follow-up defaults to the day after", _code_note_end),
@@ -2536,7 +2529,7 @@ def run_persona(p: Persona) -> list[tuple[str, str, bool, str]]:
     print("=" * 70)
 
     db = SessionLocal()
-    ctx = Ctx(user_id=make_user(db), db=db)
+    ctx = Ctx(user_id=make_user(db, p.seed), db=db)
     error = None
     try:
         for step in p.steps:
@@ -2560,7 +2553,8 @@ def run_persona(p: Persona) -> list[tuple[str, str, bool, str]]:
     # Replies come from ctx.sent, the values run() returned, never from the DB
     check_ctx = Ctx(user_id=ctx.user_id, db=check_db, marks=ctx.marks, sent=ctx.sent)
     try:
-        for label, fn in p.checks + (COMMON_CHECKS if p.common else []):
+        common = (COMMON_CHECKS + ([] if p.seed else ONBOARDING_CHECKS)) if p.common else []
+        for label, fn in p.checks + common:
             try:
                 result = fn(check_ctx)
             except Exception as e:
@@ -2619,7 +2613,7 @@ def _sum(costs: list):
 
 EVAL_RUNS = ROOT / "eval_runs.csv"
 _EVAL_FIELDS = ["timestamp", "commit", "models", "coach_md_sha256", "only", "passed", "total",
-                "warnings", "cost_usd", "checks"]
+                "warnings", "cost_usd", "checks", "persona_costs"]
 
 
 def _git_commit() -> str:
@@ -2636,7 +2630,8 @@ def _git_commit() -> str:
         return "unknown"
 
 
-def write_eval_row(rows: list, total_cost: Optional[float], only: Optional[list]) -> None:
+def write_eval_row(rows: list, total_cost: Optional[float], only: Optional[list],
+                   persona_costs: Optional[dict] = None) -> None:
     """One row per run: when, which code and prompt, which models, every check's
     result, and the cost. Committed, so scores can be compared across changes."""
     import csv
@@ -2646,13 +2641,14 @@ def write_eval_row(rows: list, total_cost: Optional[float], only: Optional[list]
     blocking = [r for r in rows if _blocking(r)]
     checks = {f"{r[0]}/{r[1].replace(WARN, '')}": ("pass" if r[2] else ("warn" if not _blocking(r) else "fail"))
               for r in rows}
+    _upgrade_eval_header()
     new_file = not EVAL_RUNS.exists()
     with open(EVAL_RUNS, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=_EVAL_FIELDS)
         if new_file:
             writer.writeheader()
         writer.writerow({
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "timestamp": datetime.now(clock.SINGAPORE).replace(tzinfo=None).isoformat(timespec="seconds"),
             "commit": _git_commit(),
             "models": f"onboarding={MODEL_ONBOARDING};coach={MODEL_COACH}",
             "coach_md_sha256": hashlib.sha256(coach_md).hexdigest()[:12],
@@ -2662,6 +2658,8 @@ def write_eval_row(rows: list, total_cost: Optional[float], only: Optional[list]
             "warnings": sum(1 for r in rows if not _blocking(r) and not r[2]),
             "cost_usd": f"{total_cost:.4f}" if total_cost is not None else "",
             "checks": json.dumps(checks, ensure_ascii=False, sort_keys=True),
+            "persona_costs": json.dumps({k: round(v, 4) for k, v in (persona_costs or {}).items()
+                                         if v is not None}, sort_keys=True),
         })
     print(f"\nAppended to {EVAL_RUNS.name}")
 
@@ -2690,6 +2688,8 @@ def print_cost_summary() -> Optional[float]:
                     acc[k] += v
 
     total = _sum(list(persona_costs.values()))
+    LAST_PERSONA_COSTS.clear()
+    LAST_PERSONA_COSTS.update(persona_costs)
     print(f"Total: {_usd(total)}")
     print("\nPer persona:")
     for name, c in persona_costs.items():
@@ -2726,6 +2726,89 @@ class Tee:
             s.flush()
 
 
+# --------------------------------------------------------------------------- #
+# Test budget: at most $0.50 a day of model calls, counted from eval_runs.csv  #
+# --------------------------------------------------------------------------- #
+
+DAILY_BUDGET_USD = 0.50
+QUICK = ["tom", "weiling", "marcus", "nadia"]
+LAST_PERSONA_COSTS: dict = {}
+# Rough cost of one message when a persona has no run on record yet
+_ONBOARDING_TURN_USD = 0.0065
+_COACHING_TURN_USD = 0.0095
+
+
+def _eval_rows() -> list:
+    import csv
+    if not EVAL_RUNS.exists():
+        return []
+    with open(EVAL_RUNS, newline="") as f:
+        return list(csv.DictReader(f))
+
+
+def _upgrade_eval_header() -> None:
+    """Rewrites eval_runs.csv with the current columns if an older run wrote fewer."""
+    import csv
+    if not EVAL_RUNS.exists():
+        return
+    with open(EVAL_RUNS, newline="") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames == _EVAL_FIELDS:
+            return
+        rows = list(reader)
+    with open(EVAL_RUNS, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=_EVAL_FIELDS)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow({k: r.get(k, "") for k in _EVAL_FIELDS})
+
+
+def spent_today() -> float:
+    """Model spend from today's runs (Singapore date)."""
+    today = datetime.now(clock.SINGAPORE).date().isoformat()
+    return sum(float(r.get("cost_usd") or 0) for r in _eval_rows() if r["timestamp"].startswith(today))
+
+
+def estimate_cost(personas: list) -> float:
+    """Each persona's cost from its last recorded run, or a rough count of its
+    messages if it has none yet."""
+    import json
+    last = {}
+    for r in _eval_rows():
+        try:
+            last.update(json.loads(r.get("persona_costs") or "{}"))
+        except ValueError:
+            pass
+    total = 0.0
+    for p in personas:
+        if p.name in last:
+            total += last[p.name]
+            continue
+        sends = sum(1 for s in p.steps if isinstance(s, str)) + sum(getattr(s, "sends", 0) for s in p.steps
+                                                                     if not isinstance(s, str))
+        # The welcome is a fixed reply, so an onboarding persona's first message is free
+        onboarding = 0 if p.seed or not p.common else min(sends, ONBOARDING_STEPS + 1)
+        paid_onboarding = max(onboarding - 1, 0)
+        total += paid_onboarding * _ONBOARDING_TURN_USD + (sends - onboarding) * _COACHING_TURN_USD
+    return total
+
+
+def budget_ok(personas: list, force: bool) -> bool:
+    spent, estimate = spent_today(), estimate_cost(personas)
+    if spent + estimate <= DAILY_BUDGET_USD:
+        print(f"Budget: ${spent:.2f} spent today, this run about ${estimate:.2f}, "
+              f"limit ${DAILY_BUDGET_USD:.2f}.")
+        return True
+    if force:
+        print(f"Budget: over the limit (${spent:.2f} spent today + about ${estimate:.2f}), "
+              "running anyway because of --force.")
+        return True
+    print(f"Refusing to run: ${spent:.2f} spent on tests today, this run would add about "
+          f"${estimate:.2f}, over the ${DAILY_BUDGET_USD:.2f} daily limit. Run fewer personas "
+          "(--only, --quick), wait until tomorrow (Singapore time), or pass --force.")
+    return False
+
+
 def main() -> None:
     names = [p.name for p in PERSONAS]
     parser = argparse.ArgumentParser(description="Persona tests against test.db")
@@ -2736,12 +2819,22 @@ def main() -> None:
                         help=f"run only these personas ({', '.join(names)}), and/or code "
                              "for the code-level checks")
     parser.add_argument("--list", action="store_true", help="list personas and exit")
+    parser.add_argument("--quick", action="store_true",
+                        help="code checks plus " + ", ".join(QUICK) + ": the tier for fixing")
+    parser.add_argument("--force", action="store_true",
+                        help=f"run even if today's test spend would pass ${DAILY_BUDGET_USD:.2f}")
     args = parser.parse_args()
+    if args.quick:
+        args.only = ["code"] + QUICK
 
     if args.list:
         for p in PERSONAS:
             print(f"{p.name:<10} {p.summary}")
         return
+
+    selected = [p for p in PERSONAS if args.only is None or p.name in args.only]
+    if selected and not budget_ok(selected, args.force):
+        sys.exit(2)
 
     out = open(OUTPUT_FILE, "w")
     sys.stdout = Tee(sys.__stdout__, out)
@@ -2754,14 +2847,13 @@ def main() -> None:
                         stream=sys.stdout, force=True)
     logging.getLogger("app.agent.loop").setLevel(logging.INFO)
 
-    selected = [p for p in PERSONAS if args.only is None or p.name in args.only]
     rows = run_code_checks() if args.only is None or "code" in args.only else []
     for p in selected:
         rows.extend(run_persona(p))
 
     print_table(rows)
     total_cost = print_cost_summary()
-    write_eval_row(rows, total_cost, args.only)
+    write_eval_row(rows, total_cost, args.only, dict(LAST_PERSONA_COSTS))
     sys.stdout.flush()
     sys.stdout = sys.__stdout__
     out.close()

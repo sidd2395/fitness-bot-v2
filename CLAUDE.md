@@ -60,6 +60,13 @@ A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
   (`MODEL_ONBOARDING`, `MODEL_COACH`), written to `test_output_split.txt`
 - `--only <persona> [<persona> ...]`: only those personas. `--only code`: code-level checks only, no
   model calls. `--list`: list personas.
+- `--quick`: code checks plus tom, weiling, marcus, nadia. The tier for fixing.
+- Budget: model test runs may cost at most $0.50 a day (Singapore date), summed
+  from `eval_runs.csv`. A run that would go over is refused with today's spend
+  and the estimate; `--force` overrides. Only Sid decides on `--force`.
+- Personas that don't test onboarding start onboarded (`seed=` in the persona:
+  profile written straight to the database). Onboarding runs for deletion,
+  marcus, kai, jo, weiling, nadia and lena.
 - `--model haiku|sonnet|<model id>`: one model for everything, written to
   `test_output_<model>.txt`
 - `python3 -m alembic upgrade head`: migrate `fitness.db`
@@ -91,16 +98,17 @@ A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
 
 ## Working rules
 
-- After a change, run only the personas it touches (`--only`), without
-  asking. They make real, paid API calls, so never more than that. Read the
-  transcript yourself.
+- After a change, run only the personas it touches (`--only`, or `--quick`),
+  without asking, within the daily test budget. They make real, paid API
+  calls. Never pass `--force` without asking Sid first. Read the transcript
+  yourself.
 - On a failure, decide first: bot bug or test bug. Max 2 fix attempts, then
   stop and report.
 - Report in 20 lines max: what changed, pass rate, new failures with the exact
   reply quoted and your verdict, run cost.
 - Hard-rule checks must pass. No word-matching checks for style; log style
   issues in `KNOWN_QUIRKS.md`.
-- Full suite only before a deploy or when asked. No new features during a fix
+- Full suite once per push (the gate), or when asked. No new features during a fix
   batch; ideas go in `IDEAS.md`.
 
 ## Current state
