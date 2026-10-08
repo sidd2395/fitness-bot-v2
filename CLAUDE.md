@@ -65,8 +65,10 @@ A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
   from `eval_runs.csv`. A run that would go over is refused with today's spend
   and the estimate; `--force` overrides. Only Sid decides on `--force`.
 - Personas that don't test onboarding start onboarded (`seed=` in the persona:
-  profile written straight to the database). Onboarding runs for deletion,
-  marcus, kai, jo, weiling, nadia and lena.
+  profile written straight to the database). Onboarding runs for marcus, kai,
+  jo, nadia and lena.
+- `eval_log.py`: eval_runs.csv and the budget, shared by `test_local.py` and
+  `scripts/preview_outreach.py`, so every paid test call is logged and counted.
 - `--model haiku|sonnet|<model id>`: one model for everything, written to
   `test_output_<model>.txt`
 - `python3 -m alembic upgrade head`: migrate `fitness.db`
