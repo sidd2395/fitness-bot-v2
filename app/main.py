@@ -2,6 +2,7 @@
 
     uvicorn app.main:app --host 0.0.0.0 --port $PORT
 """
+import asyncio
 import hmac
 import os
 from contextlib import asynccontextmanager
@@ -33,7 +34,14 @@ async def lifespan(_app: FastAPI):
     setup_logging()
     upgrade_head()
     register_commands(telegram_api())
+    # Check-ins Coach Bob sends first. PROACTIVE=off turns them off.
+    task = None
+    if os.environ.get("PROACTIVE", "on") != "off":
+        from app.proactive.sender import loop_forever
+        task = asyncio.create_task(loop_forever(telegram_api()))
     yield
+    if task:
+        task.cancel()
 
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)

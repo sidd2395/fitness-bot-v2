@@ -166,9 +166,9 @@ TOOL_SCHEMAS = [
         "name": "remember",
         "description": (
             "Save something about the person that will matter in later conversations: "
-            "schedule, travel, events, likes and dislikes, work or family context that "
-            "affects training. Not check-in numbers (log_checkin) and not injuries or "
-            "health issues (save_profile issue). One fact per note, under 200 characters."
+            "schedule, travel, events, being ill, likes and dislikes, work or family context "
+            "that affects training. Not check-in numbers (log_checkin) and not injuries "
+            "(save_profile issue). One fact per note, under 200 characters."
         ),
         "input_schema": {
             "type": "object",
@@ -183,6 +183,14 @@ TOOL_SCHEMAS = [
                         "YYYY-MM-DD. The day to ask how it went, if it's worth asking about: "
                         "usually the day after an event or trip ends. Work it out from "
                         "today's date in the context block. Omit if there's nothing to follow up."
+                    ),
+                },
+                "kind": {
+                    "type": "string", "enum": ["trip", "sick", "event", "other"],
+                    "description": (
+                        "trip: travel or holiday away from home. sick: a cold, flu or other "
+                        "short illness (not an injury). event: a one-off occasion like a "
+                        "wedding or race. other: anything else."
                     ),
                 },
                 "starts_on": {
@@ -216,6 +224,18 @@ TOOL_SCHEMAS = [
         },
     },
     {
+        "name": "set_reminders",
+        "description": (
+            "Change when you message them first, only when they ask: 'stop the night ones' "
+            "is morning, 'no more check-ins' is off, 'give me a break for a week' is pause."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"setting": {"type": "string", "enum": ["both", "morning", "off", "pause"]}},
+            "required": ["setting"],
+        },
+    },
+    {
         "name": "resolve_note",
         "description": (
             "Mark a note as done: its follow-up has been asked about, or it's no longer true. "
@@ -241,6 +261,11 @@ def dispatch(name: str, inp: dict, user_id: int, raw_msg_id: int, db: Session) -
         return _resolve_note(inp, user_id, db)
     if name == "get_history":
         return _get_history(inp, user_id, db)
+    if name == "set_reminders":
+        user = db.get(User, user_id)
+        if not _onboarded(user):
+            return _NOT_ONBOARDED
+        return apply_reminders(user, str(inp.get("setting", "")), db)
     return {"error": f"unknown tool: {name}"}
 
 
@@ -1135,7 +1160,9 @@ def _remember(inp: dict, user_id: int, db: Session) -> dict:
     if len(text) > NOTE_MAX_CHARS:
         return {"saved": False, "error": f"Note is {len(text)} characters. Shorten it to under "
                                          f"{NOTE_MAX_CHARS} and call remember again."}
-    if _INJURY_RE.search(text):
+    kind = inp.get("kind") if inp.get("kind") in ("trip", "sick", "event", "other") else "other"
+    # Being ill is a note (sick); an injury belongs in issues
+    if kind != "sick" and _INJURY_RE.search(text):
         return {"saved": False, "error": "Injuries and health issues aren't notes. Not saved. "
                                          "Use save_profile with issue instead."}
     if _NUMBERS_RE.search(text):
@@ -1182,10 +1209,13 @@ def _remember(inp: dict, user_id: int, db: Session) -> dict:
 
     # A dated note always gets a follow-up: the day after it ends, if the model
     # didn't set one (a trip with no end counts as 7 days, see note_end)
-    end = note_end(starts_on, ends_on, text)
-    if follow_up_on is None and end is not None:
+    end = note_end(starts_on, ends_on, text, kind if kind != "other" else None)
+    if follow_up_on is None and end is not None and kind != "sick":
         follow_up_on = end + timedelta(days=1)
-    note = Note(user_id=user_id, text=text, follow_up_on=follow_up_on, starts_on=starts_on, ends_on=ends_on)
+    if kind == "sick" and starts_on is None:
+        starts_on = date.today()   # how long they've been ill counts from here
+    note = Note(user_id=user_id, text=text, follow_up_on=follow_up_on, starts_on=starts_on,
+                ends_on=ends_on, kind=kind)
     db.add(note)
     db.commit()
     result = {"saved": True, "note_id": note.note_id,
@@ -1295,3 +1325,27 @@ def add_sports_from_message(user_id: int, message: str, db: Session) -> list[str
         profile.disciplines = ",".join(current + new)
         db.commit()
     return new
+
+
+
+# ---------------------------------------------------------------------------
+# Reminders: when Coach Bob may message first. One function for the
+# set_reminders tool, /reminders and the end-of-onboarding buttons.
+# ---------------------------------------------------------------------------
+
+REMINDER_PAUSE_DAYS = 7
+
+
+def apply_reminders(user: User, choice: str, db: Session) -> dict:
+    """both | morning | off, or pause for 7 days from today."""
+    if choice == "pause":
+        until = date.today() + timedelta(days=REMINDER_PAUSE_DAYS)
+        user.paused_until = until
+        db.commit()
+        return {"saved": {"paused_until": str(until)}, "reminders": user.reminders}
+    if choice not in ("both", "morning", "off"):
+        return {"saved": False, "error": "setting must be both, morning, off or pause."}
+    user.reminders = choice
+    user.paused_until = None
+    db.commit()
+    return {"saved": {"reminders": choice}}

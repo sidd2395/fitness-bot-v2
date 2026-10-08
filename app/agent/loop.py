@@ -10,7 +10,7 @@ import anthropic
 from dotenv import load_dotenv
 from sqlalchemy.orm import Session
 
-from app.db.models import RawMessage, User
+from app.db.models import OutboundMessage, RawMessage, User
 from app.agent.tools import (ONBOARDING_STEPS, TOOL_SCHEMAS, add_sports_from_message, dispatch,
                              only_from_message)
 from app.agent.context import build_system_prompt, build_trainer_ack_prompt
@@ -154,10 +154,34 @@ def _history(user_id: int, raw_msg_id: int, db: Session) -> list[dict]:
         .limit(HISTORY_EXCHANGES)
         .all()
     )
-    messages = []
-    for row in reversed(rows):
-        messages.append({"role": "user", "content": row.body})
-        messages.append({"role": "assistant", "content": row.reply_text})
+    # Messages we sent first in the same window, in time order with the exchanges,
+    # so a reply knows "you messaged first at 10:02" and what it said
+    since = rows[-1].created_at if rows else datetime.utcnow() - HISTORY_WINDOW
+    outbound = (
+        db.query(OutboundMessage)
+        .filter(OutboundMessage.user_id == user_id, OutboundMessage.status == "sent",
+                OutboundMessage.sent_at >= max(since, datetime.utcnow() - HISTORY_WINDOW))
+        .order_by(OutboundMessage.sent_at)
+        .all()
+    )
+    events = [(row.created_at, "user", row.body) for row in rows]
+    events += [(row.created_at, "assistant", row.reply_text) for row in rows]
+    events += [(o.sent_at, "assistant",
+                f"You messaged first at {o.sent_at + timedelta(hours=8):%H:%M}: {o.text}") for o in outbound]
+    # A user message and our reply share a timestamp: user first
+    events.sort(key=lambda e: (e[0], e[1] != "user"))
+    messages: list[dict] = []
+    for _, role, text in events:
+        if messages and messages[-1]["role"] == role:
+            messages[-1]["content"] += "\n\n" + text
+        else:
+            messages.append({"role": role, "content": text})
+    # The current message is appended after this, so history can't end on a user turn
+    if messages and messages[-1]["role"] == "user":
+        messages.pop()
+    # The API wants a user turn first; a message we sent first can open the history
+    if messages and messages[0]["role"] == "assistant":
+        messages.insert(0, {"role": "user", "content": "(Earlier today)"})
     return messages
 
 
@@ -383,6 +407,9 @@ def _call(model: str, user_id: int, system: list, messages: list,
           tool_choice: Optional[dict] = None, max_tokens: int = 1024,
           tools: Optional[list] = None):
     kwargs = {"tool_choice": tool_choice} if tool_choice else {}
+    tools = tools if tools is not None else TOOL_SCHEMAS
+    if tools:   # an empty list means no tools at all (messages we send first)
+        kwargs["tools"] = tools
     started = time.monotonic()
     response = _client.messages.create(
         model=model,
@@ -391,7 +418,6 @@ def _call(model: str, user_id: int, system: list, messages: list,
         # tool_choice can't be combined with thinking (Sonnet 5 thinks by default)
         thinking={"type": "disabled"},
         system=system,
-        tools=tools if tools is not None else TOOL_SCHEMAS,
         messages=messages,
         **kwargs,
     )

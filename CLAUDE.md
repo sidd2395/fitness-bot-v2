@@ -35,6 +35,13 @@ A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
   `summary.py` the /summary list (30-character lines, from `stats.daily_history`,
   the same rows `get_history` returns), `api.py` the Bot API calls and
   message splitting.
+- `app/proactive/`: check-ins Coach Bob sends first. `planner.py` is pure (facts
+  and a clock in, a reason or None out) and holds the rules in order;
+  `facts.py` reads them from the database; `sender.py` runs every 5 minutes in
+  the app, claims the (user, day, slot) row in `outbound_messages` before the
+  model is called, writes one message with no tools, drops it if empty, over 50
+  words or more than one question, and sets reminders off on a 403. Code decides
+  whether to send; the model only decides what it says.
 - `app/main.py`: FastAPI. `POST /telegram/webhook` (secret header or 401,
   handled in a background task), `GET /health`, migrations on startup.
 - `app/logs.py`: JSON logs in prod. Never log message text, replies, names or keys.
@@ -64,6 +71,8 @@ A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
 - `python3 scripts/user_data.py --chat <id> --count | --delete`: row counts per
   table, or delete one user. Never prints content.
 - `python3 scripts/export_transcript.py [--user N | --chat ID] [--anonymise]`
+- `python3 scripts/preview_outreach.py --user N --reason morning|evening|quiet|quiet_last|sick|trip_return`:
+  the message we'd send first, from the real prompt and model. Sends and writes nothing.
 
 ## Rules
 

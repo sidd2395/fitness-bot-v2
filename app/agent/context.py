@@ -1,4 +1,5 @@
 import re
+from typing import Optional
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from sqlalchemy.orm import Session
@@ -90,7 +91,15 @@ that affects it. "reminder given today: no": \
 remind them once if today's training touches it.
 - remember: for a trip or event with dates, pass starts_on and ends_on, \
 worked out from today's date. Code then shows whether it's upcoming, \
-happening now or over.
+happening now or over. Always pass kind: trip, sick, event or other.
+- When they're ill (a cold, flu, a stomach bug), remember it with kind sick. \
+When they tell you they've recovered, resolve_note that sick note. Injuries \
+are still save_profile issue, not notes.
+- set_reminders: only when they ask to change when you message first ("stop \
+the night ones" is morning, "no more check-ins" is off, "a week off" is pause).
+- "Next check-in from you" in the context block is the only check-in you may \
+promise. If it says none, don't say you'll message, check in or follow up \
+later; ask them to message you.
 - Check-in requests: the context block has one line about this, and it \
 decides. "No check-in yet": before their first ever check-in, one gentle \
 invitation to send it is fine, at most one per reply. "Already asked today": \
@@ -247,8 +256,41 @@ def _note_line(note: Note, today: date) -> str:
     return line + _follow_up(note)
 
 
-def _context_block(user: User, db: Session) -> str:
+def build_outbound_prompt(user: User, db: Session, reason: str, note: Optional[Note] = None) -> list[dict]:
+    """For a message Coach Bob sends first: the same static prompt, then the
+    reason, the note it's about, and the context block. Reads only: nothing is
+    claimed or written, so building it twice changes nothing."""
+    head = f"MESSAGING FIRST\nReason: {reason}"
+    if note is not None:
+        head += "\nAbout this note:\n" + _note_line(note, date.today())
+    return [
+        {"type": "text", "text": STATIC_PROMPT, "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": head + "\n\n" + _context_block(user, db, outbound=True)},
+    ]
+
+
+def next_checkin_line(user: User, db: Session) -> str:
+    """When we'll next message first, worked out by the planner. The only check-in
+    the coach may promise."""
+    from app.proactive.facts import build_facts
+    from app.proactive.planner import next_checkin
+    now = clock.now_local()
+    when = next_checkin(build_facts(user, db, now), now)
+    if when is None:
+        return ("Next check-in from you: none. Don't say you'll message or check in later; "
+                "ask them to message you instead.")
+    label = f"tonight {when.hour - 12}pm" if when.date() == now.date() else f"tomorrow {when.hour}am"
+    return (f"Next check-in from you: {label}. You may say you'll check in then; never "
+            "promise any other time.")
+
+
+def _context_block(user: User, db: Session, outbound: bool = False) -> str:
+    """outbound=True is for a message we send first: nothing is claimed (milestones,
+    tips, the steady-weight flag stay for their next reply) and nothing is written."""
     today = date.today()
+    if not outbound:
+        from app.proactive.facts import close_old_sick_notes
+        close_old_sick_notes(user.user_id, db, today)
     profile = user.profile
     active_issues = [i for i in user.issues if i.status == "active"]
     s = compute_stats(user.user_id, db, today)
@@ -328,7 +370,7 @@ def _context_block(user: User, db: Session) -> str:
         lead = lead_with_trend(last, trend, goal)
         if lead:
             lines.append(lead)
-    steady = claim_steady_weight(user.user_id, db, today, goal)
+    steady = None if outbound else claim_steady_weight(user.user_id, db, today, goal)
     if steady:
         who = f"to check with {user.trainer_name}" if user.trainer_name else "to try"
         lines.append(f"{steady}. Mention it once, calmly, with one small change {who}. Never a "
@@ -339,11 +381,11 @@ def _context_block(user: User, db: Session) -> str:
         lines.append(f"Short sleep: {sleep_text}")
     lines.append(f"Today: {s['logged_today']}.")
     lines.append(f"State: {s['user_state']}.")
-    tip = claim_tip(user.user_id, db, today)
+    tip = None if outbound else claim_tip(user.user_id, db, today)
     if tip:
         lines.append(f"Tip you may offer, at most once and only if it fits this reply: {tip}")
     # Stored as it's handed over, so it shows on this turn only
-    milestone = claim_milestone(user.user_id, db, today)
+    milestone = None if outbound else claim_milestone(user.user_id, db, today)
     if milestone and active_issues:
         lines.append(f"Milestone today: {milestone}. Mention it once, briefly, at the END of "
                      "the reply, after any safety point.")
@@ -362,6 +404,8 @@ def _context_block(user: User, db: Session) -> str:
     lines.append(f"Fields already reminded about today: {', '.join(asked) if asked else 'nothing'}.")
     # Whether any reply today (the "all set" reply included) asked for a check-in
     lines.append(checkin_request_line(user.user_id, today, db))
+    if not outbound:
+        lines.append(next_checkin_line(user, db))
 
     # --- Notes: long-term memory, written by the remember tool -------------- #
     open_notes = (

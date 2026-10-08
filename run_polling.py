@@ -7,6 +7,8 @@ webhook. Polling and a webhook can't both be active, so this removes any webhook
 first; run scripts/set_webhook.py again before going back to the deployed bot.
 """
 import logging
+import os
+import threading
 import time
 
 from dotenv import load_dotenv
@@ -31,6 +33,15 @@ def main() -> None:
     api = TelegramAPI()
     api.call("deleteWebhook")
     register_commands(api)
+    if os.environ.get("PROACTIVE", "on") != "off":
+        # Check-ins Coach Bob sends first, on the same schedule as the deployed app
+        from app.proactive.sender import INTERVAL_S, run_safely
+
+        def every_few_minutes():
+            while True:
+                run_safely(api)
+                time.sleep(INTERVAL_S)
+        threading.Thread(target=every_few_minutes, daemon=True).start()
     me = api.call("getMe")
     print(f"Polling as @{me['username']}. Ctrl+C to stop.")
 

@@ -18,6 +18,7 @@ from app.agent.loop import run
 from app import clock
 from app.capabilities import ALL_SET, ALL_SET_BUTTONS, COMMANDS, help_buttons, help_section
 from app.clock import day_start_utc
+from app.agent.tools import apply_reminders
 from app.db import delete_user
 from app.db.models import RawMessage, TelegramUpdate, User
 from app.db.session import SessionLocal
@@ -183,7 +184,7 @@ def _handle(update: dict, api, db: Session) -> None:
 def _on_command(text: str, chat_id: str, user: Optional[User], api, db: Session) -> None:
     command = text.split()[0].split("@")[0].lower()
     _log(f"command{command.replace('/', '_')}" if command in
-         ("/start", "/help", "/mydata", "/delete", "/summary") else "command_unknown", user)
+         ("/start", "/help", "/mydata", "/delete", "/summary", "/reminders") else "command_unknown", user)
     if command == "/start":
         # Telegram sends /start when someone first opens the bot
         if user is None or (user.consent_given_at is None and not user.blocked):
@@ -204,6 +205,15 @@ def _on_command(text: str, chat_id: str, user: Optional[User], api, db: Session)
                 api.send_message(chat_id, message)
             user.summary_used_at = datetime.utcnow()   # so the /summary tip isn't offered
             db.commit()
+    elif command == "/reminders":
+        if user is None or user.consent_given_at is None or user.blocked:
+            api.send_message(chat_id, replies.NOTHING_HELD)
+        else:
+            status = replies.REMINDERS_STATUS.format(when=replies.REMINDERS_WHEN.get(user.reminders, "never"))
+            today = clock.now_local().date()
+            if user.paused_until and user.paused_until >= today and user.reminders != "off":
+                status += f" Paused until {user.paused_until:%a} {user.paused_until.day} {user.paused_until:%b}."
+            api.send_message(chat_id, status, buttons=replies.REMINDERS_BUTTONS)
     elif command == "/mydata":
         api.send_message(chat_id, format_mydata(user, db))
     elif command == "/delete":
@@ -256,19 +266,14 @@ def _on_button(callback: dict, chat_id: str, user: Optional[User], api, db: Sess
 
 
 def set_reminders(user: User, choice: str, db: Session) -> str:
-    """both | morning | off, or pause for 7 days. Returns the confirmation to send."""
-    if choice == "pause":
-        until = clock.now_local().date() + timedelta(days=7)
-        user.paused_until = until
-        db.commit()
-        _log("reminders_paused", user)
-        return replies.REMINDERS_SET["pause"].format(date=f"{until:%a} {until.day} {until:%b}")
-    if choice not in ("both", "morning", "off"):
+    """A reminders button: saves the choice and returns the confirmation to send."""
+    result = apply_reminders(user, choice, db)
+    if not result.get("saved"):
         return replies.UNKNOWN_COMMAND
-    user.reminders = choice
-    user.paused_until = None
-    db.commit()
     _log(f"reminders_{choice}", user)
+    if choice == "pause":
+        until = user.paused_until
+        return replies.REMINDERS_SET["pause"].format(date=f"{until:%a} {until.day} {until:%b}")
     return replies.REMINDERS_SET[choice]
 
 

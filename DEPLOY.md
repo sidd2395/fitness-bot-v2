@@ -3,7 +3,9 @@
 Railway, one web service plus Postgres, Singapore region. The build uses
 Railpack (set in `railway.json`), which reads the Python version from
 `.python-version` (3.12; Railpack supports 3.10 and up). `requirements.txt`
-pins every package. Migrations run when the app starts.
+pins every package. Migrations run when the app starts (`upgrade_head()` in
+the FastAPI startup, before it takes requests), so a deploy with a new
+migration needs nothing extra. The same startup begins the check-in loop.
 
 ## Services
 
@@ -27,6 +29,7 @@ pins every package. Migrations run when the app starts.
 | `MODEL_COACH` | `claude-sonnet-5` |
 | `TZ` | `Asia/Singapore` (check-in dates use the server's local date) |
 | `LOG_FORMAT` | optional; logs are JSON on Railway anyway (`RAILWAY_ENVIRONMENT` is set there) |
+| `PROACTIVE` | optional; `off` stops the check-ins Coach Bob sends first (10am and 9pm). On by default |
 
 Never put values in this file or in git.
 

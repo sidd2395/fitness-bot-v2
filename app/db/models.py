@@ -42,6 +42,8 @@ class User(Base):
                                 cascade="all, delete-orphan")
     nudges       = relationship("Nudge",      back_populates="user",
                                 cascade="all, delete-orphan")
+    outbound     = relationship("OutboundMessage", back_populates="user",
+                                cascade="all, delete-orphan")
     raw_messages = relationship("RawMessage", back_populates="user",
                                 foreign_keys="RawMessage.user_id",
                                 cascade="all, delete-orphan")
@@ -87,6 +89,7 @@ class Note(Base):
     follow_up_on = Column(Date,     nullable=True)
     starts_on    = Column(Date,     nullable=True)   # when the event or trip starts, if it has dates
     ends_on      = Column(Date,     nullable=True)   # last day; same as starts_on for a one-day event
+    kind         = Column(String,   nullable=True)   # trip | sick | event | other
     resolved     = Column(Boolean,  default=False, nullable=False)
     created_at   = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -116,6 +119,27 @@ class Nudge(Base):
     shown_on = Column(Date,   nullable=False)
 
     user = relationship("User", back_populates="nudges")
+
+
+class OutboundMessage(Base):
+    """A check-in Coach Bob sends first. The row is claimed before the model is
+    called, and (user, local_date, slot) is unique, so a restart or a second
+    instance can never send twice."""
+    __tablename__ = "outbound_messages"
+    __table_args__ = (UniqueConstraint("user_id", "local_date", "slot", name="uq_outbound_user_day_slot"),)
+
+    outbound_id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id     = Column(Integer, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False, index=True)
+    local_date  = Column(Date,     nullable=False)
+    slot        = Column(String,   nullable=False)   # morning | evening
+    reason      = Column(String,   nullable=False)
+    note_id     = Column(Integer,  nullable=True)
+    status      = Column(String,   nullable=False)   # claimed | sent | dropped | failed
+    text        = Column(Text,     nullable=True)
+    claimed_at  = Column(DateTime, nullable=False)
+    sent_at     = Column(DateTime, nullable=True)
+
+    user = relationship("User", back_populates="outbound")
 
 
 class Checkin(Base):
