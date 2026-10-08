@@ -2184,6 +2184,34 @@ def _code_onboarding_parsing(db) -> CheckResult:
     return words_age == 27 and _near(kg, 81.6), f"age={words_age}, start_weight={kg}"
 
 
+def _code_commands_not_messages(db) -> CheckResult:
+    """Commands and button taps don't count as messaging us: after /reminders,
+    /help, /summary, /mydata and two taps, the planner still sees the last
+    free-text message from 3 days ago and plans "quiet"."""
+    from app.proactive.facts import build_facts
+    from app.proactive.planner import plan
+    chat = "5550600"
+    with _telegram(chat) as t:
+        t.send(_tg_tap(chat, "consent"), db)
+        u = _tg_user(db, chat)
+        u.onboarding_step, u.reminders = ONBOARDING_STEPS, "both"
+        u.consent_given_at = datetime.utcnow() - timedelta(days=10)
+        db.add(RawMessage(user_id=u.user_id, body="80.1 slept 7h", reply_text="ok",
+                          created_at=datetime.utcnow() - timedelta(days=3)))
+        db.commit()
+        for command in ("/reminders", "/help", "/summary", "/mydata"):
+            t.send(_tg_text(chat, command), db)
+        t.send(_tg_tap(chat, "help:send"), db)
+        t.send(_tg_tap(chat, "remind:both"), db)
+    db.expire_all()
+    now = clock.now_local().replace(hour=10, minute=5)
+    facts = build_facts(_tg_user(db, chat), db, now)
+    days = (now.date() - facts.last_message_at.date()).days if facts.last_message_at else None
+    decision = plan(facts, "morning", now)
+    ok = days == 3 and decision is not None and decision.reason == "quiet"
+    return ok, f"days since last message={days}, plan={decision}"
+
+
 def _code_mydata_optional(db) -> CheckResult:
     """/mydata leaves out empty optional fields and explains when there are no targets."""
     from app.telegram.mydata import format_mydata
@@ -2495,6 +2523,7 @@ CODE_CHECKS = [
     ("a reply can't claim a save no tool made", _code_unbacked_save),
     ("onboarding parses an age in words and pounds", _code_onboarding_parsing),
     ("check-in planner: every rule, fixed clock", _code_planner),
+    ("planner: commands and button taps don't count as messages", _code_commands_not_messages),
     ("check-in sender: once per slot, stale, dropped, 403, history, /reminders", _code_outbound_sender),
     ("note_end: 7-day trips, one-day events; follow-up defaults to the day after", _code_note_end),
     ("7-day trend phrase, and lead with it when today is the wrong way", _code_trend),
@@ -2758,8 +2787,6 @@ def main() -> None:
     parser.add_argument("--list", action="store_true", help="list personas and exit")
     parser.add_argument("--quick", action="store_true",
                         help="code checks plus " + ", ".join(QUICK) + ": the tier for fixing")
-    parser.add_argument("--force", action="store_true",
-                        help=f"run even if today's test spend would pass ${eval_log.DAILY_BUDGET_USD:.2f}")
     args = parser.parse_args()
     if args.quick:
         args.only = ["code"] + QUICK
@@ -2770,8 +2797,8 @@ def main() -> None:
         return
 
     selected = [p for p in PERSONAS if args.only is None or p.name in args.only]
-    if selected and not eval_log.budget_ok(estimate_cost(selected), args.force):
-        sys.exit(2)
+    if selected:
+        eval_log.announce(estimate_cost(selected))
 
     out = open(OUTPUT_FILE, "w")
     sys.stdout = Tee(sys.__stdout__, out)

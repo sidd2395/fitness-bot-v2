@@ -6,8 +6,7 @@ writes nothing to the database (the session is rolled back and never committed).
     python3 scripts/preview_outreach.py --user 3 --reason trip_return
 
 For trip_return and sick it uses the user's most recent trip or sick note.
-The model call is paid: it counts against the daily test budget, and its cost
-is logged to eval_runs.csv like a test run. --force overrides the budget.
+The model call is paid; its cost is logged to eval_runs.csv like a test run.
 """
 import argparse
 import json
@@ -40,10 +39,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--user", type=int, required=True)
     parser.add_argument("--reason", choices=REASONS, required=True)
-    parser.add_argument("--force", action="store_true", help="run even if over today's test budget")
     args = parser.parse_args()
-    if not eval_log.budget_ok(PREVIEW_ESTIMATE_USD, args.force):
-        sys.exit(2)
+    eval_log.announce(PREVIEW_ESTIMATE_USD)
 
     # Add up what this preview's model call costs, for eval_runs.csv
     spent = [0.0]

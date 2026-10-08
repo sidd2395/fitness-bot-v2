@@ -61,14 +61,11 @@ A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
 - `--only <persona> [<persona> ...]`: only those personas. `--only code`: code-level checks only, no
   model calls. `--list`: list personas.
 - `--quick`: code checks plus tom, weiling, marcus, nadia. The tier for fixing.
-- Budget: model test runs may cost at most $0.50 a day (Singapore date), summed
-  from `eval_runs.csv`. A run that would go over is refused with today's spend
-  and the estimate; `--force` overrides. Only Sid decides on `--force`.
 - Personas that don't test onboarding start onboarded (`seed=` in the persona:
   profile written straight to the database). Onboarding runs for marcus, kai,
   jo, nadia and lena.
-- `eval_log.py`: eval_runs.csv and the budget, shared by `test_local.py` and
-  `scripts/preview_outreach.py`, so every paid test call is logged and counted.
+- `eval_log.py`: eval_runs.csv, shared by `test_local.py` and
+  `scripts/preview_outreach.py`, so every paid test call's cost is logged.
 - `--model haiku|sonnet|<model id>`: one model for everything, written to
   `test_output_<model>.txt`
 - `python3 -m alembic upgrade head`: migrate `fitness.db`
@@ -100,18 +97,25 @@ A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
 
 ## Working rules
 
-- After a change, run only the personas it touches (`--only`, or `--quick`),
-  without asking, within the daily test budget. They make real, paid API
-  calls. Never pass `--force` without asking Sid first. Read the transcript
-  yourself.
+- Test what the change could break, not everything. Before any paid run,
+  list the tests, why each one, and the estimated cost, in 5 lines max. Then
+  run them. Every run's cost goes to `eval_runs.csv`.
+  - Code checks and planner tests: always, they're free.
+  - coach.md, loop.py or context.py changed: tom, weiling, marcus (safety)
+    plus the 1-2 personas closest to the change.
+  - tools.py or stats.py changed: the personas that use the changed tool or field.
+  - Telegram, commands or buttons changed: code checks only, unless the change
+    touches what the model sees.
+  - Proactive changes: planner tests plus previews for the affected reasons.
+  - Full suite only when Sid asks for it.
+- Read the transcript yourself.
 - On a failure, decide first: bot bug or test bug. Max 2 fix attempts, then
   stop and report.
 - Report in 20 lines max: what changed, pass rate, new failures with the exact
   reply quoted and your verdict, run cost.
 - Hard-rule checks must pass. No word-matching checks for style; log style
   issues in `KNOWN_QUIRKS.md`.
-- Full suite once per push (the gate), or when asked. No new features during a fix
-  batch; ideas go in `IDEAS.md`.
+- No new features during a fix batch; ideas go in `IDEAS.md`.
 
 ## Current state
 

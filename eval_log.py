@@ -1,6 +1,6 @@
-"""eval_runs.csv and the daily test budget, shared by test_local.py and the
-scripts that call the model for testing (scripts/preview_outreach.py), so every
-paid test run is logged and counted the same way.
+"""eval_runs.csv, shared by test_local.py and the scripts that call the model
+for testing (scripts/preview_outreach.py), so every paid test run's cost is
+logged the same way.
 """
 import csv
 import hashlib
@@ -12,7 +12,6 @@ ROOT = Path(__file__).resolve().parent
 EVAL_RUNS = ROOT / "eval_runs.csv"
 FIELDS = ["timestamp", "commit", "models", "coach_md_sha256", "only", "passed", "total",
           "warnings", "cost_usd", "checks", "persona_costs"]
-DAILY_BUDGET_USD = 0.50
 _SINGAPORE = timezone(timedelta(hours=8))
 
 
@@ -81,18 +80,7 @@ def spent_today() -> float:
     return sum(float(r.get("cost_usd") or 0) for r in rows() if r["timestamp"].startswith(today))
 
 
-def budget_ok(estimate: float, force: bool = False) -> bool:
-    """Prints the decision. Over the limit is refused unless forced."""
-    spent = spent_today()
-    if spent + estimate <= DAILY_BUDGET_USD:
-        print(f"Budget: ${spent:.2f} spent today, this run about ${estimate:.2f}, "
-              f"limit ${DAILY_BUDGET_USD:.2f}.")
-        return True
-    if force:
-        print(f"Budget: over the limit (${spent:.2f} spent today + about ${estimate:.2f}), "
-              "running anyway because of --force.")
-        return True
-    print(f"Refusing to run: ${spent:.2f} spent on tests today, this run would add about "
-          f"${estimate:.2f}, over the ${DAILY_BUDGET_USD:.2f} daily limit. Run less, wait until "
-          "tomorrow (Singapore time), or pass --force.")
-    return False
+def announce(estimate: float) -> None:
+    """Prints today's test spend and this run's estimate. There's no limit; every
+    run's cost is logged so spend stays visible."""
+    print(f"Test spend today: ${spent_today():.2f}. This run: about ${estimate:.2f}.")
