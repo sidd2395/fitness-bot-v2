@@ -71,7 +71,7 @@ from app.agent.tools import MAX_OPEN_NOTES, ONBOARDING_STEPS, dispatch  # noqa: 
 from app.pricing import PRICES, cost_usd, usage_counts  # noqa: E402
 from app.telegram import handler as tg  # noqa: E402
 from app import clock  # noqa: E402
-from app.agent.context import issue_reminder_line, mentions_issue  # noqa: E402
+from app.agent.context import issue_reminder_line, mentions_issue, next_checkin_line  # noqa: E402
 from app.agent.stats import note_timing  # noqa: E402
 
 _REAL_NOW_LOCAL = clock.now_local
@@ -141,6 +141,7 @@ class Sent:
     active_issue: bool = False       # they had an active issue when it was sent
     struggling: bool = False         # user_state was struggling before or after the turn
     follow_up_due: bool = False      # a note's follow-up was due when it was sent
+    next_checkin: str = ""           # the context block's "Next check-in from you" line
     day: int = 0                     # days advanced in the test when it was sent
     tools: list = field(default_factory=list)   # (name, input, result) per tool call
     usage: list = field(default_factory=list)   # (model, token counts) per model call
@@ -174,6 +175,7 @@ class Persona:
     summary: str
     steps: list[Step]
     checks: list[tuple[str, Callable[[Ctx], CheckResult]]]
+    common: bool = True   # False for a persona that sends no chat messages
 
 
 def make_user(db) -> int:
@@ -197,6 +199,10 @@ def send(ctx: Ctx, message: str) -> None:
         print(f"    [context] {checkin_request_line(ctx.user_id, date.today(), ctx.db)}")
         for issue in (i for i in user.issues if i.status == "active"):
             print(f"    [context] {issue_reminder_line(issue, ctx.user_id, date.today(), ctx.db)}")
+        next_line = next_checkin_line(user, ctx.db)
+        print(f"    [context] {next_line}")
+    else:
+        next_line = ""
     before = len(_checkins(ctx))
     _TOOL_LOG.clear()
     _USAGE_LOG.clear()
@@ -205,6 +211,7 @@ def send(ctx: Ctx, message: str) -> None:
     ctx.sent.append(Sent(message, reply, onboarded, new_checkin=len(_checkins(ctx)) > before,
                          active_issue=active_issue, struggling=struggling,
                          follow_up_due=follow_up_due, day=ctx.marks.get("days_advanced", 0),
+                         next_checkin=next_line,
                          tools=list(_TOOL_LOG), usage=list(_USAGE_LOG)))
     print(textwrap.indent(reply or "(empty reply)", "<<< ", lambda _: True))
 
@@ -446,12 +453,13 @@ _PROMISE_RE = re.compile(
 
 
 def no_promise_to_message_first(ctx: Ctx) -> CheckResult:
-    """No reply promises to message or check in later. The fixed end-of-onboarding
-    copy offers check-ins with buttons, so it's left out. A warning until Part B,
-    where the context block's next check-in line decides what may be promised."""
+    """A reply may promise a check-in only when the context block's "Next check-in
+    from you" line shows one. The fixed end-of-onboarding copy, which offers
+    check-ins with buttons, is left out."""
     bad = [(s.message, m.group(0)) for s in ctx.sent
+           if not s.next_checkin or "from you: none" in s.next_checkin
            for m in _PROMISE_RE.finditer(s.reply.replace(ONBOARDED_REPLY, ""))]
-    return not bad, f"promises: {bad}"
+    return not bad, f"promises with no check-in due: {bad}"
 
 
 _STOCK_PRAISE = re.compile(r"\b(great goal|thanks for sharing|that'?s (a )?great|love that|awesome|amazing|"
@@ -489,7 +497,7 @@ COMMON_CHECKS = [
     ("no check-in saved before onboarding completes", no_checkin_during_onboarding),
     ("no reply repeats the same 6-word run", no_repeated_runs),
     ("no reply has more than one question mark", one_question_at_most),
-    (WARN + "no reply promises to message first or says it checks in", no_promise_to_message_first),
+    ("no promise of a check-in unless one is due", no_promise_to_message_first),
     ("onboarding: no stock praise", onboarding_no_stock_praise),
     ("onboarding: at most one question mark per message", onboarding_one_question),
 ]
@@ -1139,6 +1147,54 @@ def _mei_decline(ctx: Ctx) -> CheckResult:
     return bool(offer) and not plan, f"reply: {reply!r}"
 
 
+# Outreach: messages Coach Bob sends first, written by the real model. The planner
+# is tested in code; this checks what the model writes for three reasons.
+_OUT_BANNED = re.compile(r"don'?t forget|you missed|\breminder|\bstreak", re.I)
+
+
+def _out_setup(ctx: Ctx) -> None:
+    u = _user(ctx)
+    u.name, u.age, u.sex, u.onboarding_step = "Reza", 33, "M", ONBOARDING_STEPS
+    u.consent_given_at = datetime.utcnow() - timedelta(days=12)
+    u.telegram_chat_id, u.reminders = "5550500", "both"
+    ctx.db.add(Profile(user_id=u.user_id, goal="lose_fat", start_weight=81.0, motivation="feel fit at 35"))
+    ctx.db.add(Checkin(user_id=u.user_id, date=date.today() - timedelta(days=1), entry_type="morning",
+                       weight_kg=80.4, sleep_hours=5.0, training="legs", energy=2, raw_message="80.4 slept 5h legs"))
+    ctx.db.add(RawMessage(user_id=u.user_id, body="80.4 slept 5h legs", status="processed",
+                          reply_text="Short night, keep legs light today.",
+                          created_at=datetime.utcnow() - timedelta(days=1)))
+    ctx.db.commit()
+
+
+def _outbound(reason: str, note_text: Optional[str] = None) -> Callable[[Ctx], None]:
+    def step(ctx: Ctx) -> None:
+        from app.proactive.sender import compose
+        note = None
+        if note_text:
+            note = Note(user_id=ctx.user_id, text=note_text, kind="trip",
+                        starts_on=date.today() - timedelta(days=6), ends_on=date.today() - timedelta(days=1))
+            ctx.db.add(note)
+            ctx.db.commit()
+        _USAGE_LOG.clear()
+        text = compose(_user(ctx), reason, note, ctx.db)
+        ctx.marks[f"out_{reason}"] = text
+        ctx.sent.append(Sent(f"(we message first: {reason})", text, True, usage=list(_USAGE_LOG)))
+        print(f"\n[we message first: {reason}]")
+        print(textwrap.indent(text or "(empty)", "<<< ", lambda _: True))
+    return step
+
+
+def _out_ok(reason: str, must: Optional[str] = None) -> Callable[[Ctx], CheckResult]:
+    def check(ctx: Ctx) -> CheckResult:
+        text = ctx.marks.get(f"out_{reason}", "")
+        words, questions = len(text.split()), text.count("?")
+        banned = _OUT_BANNED.findall(text)
+        ok = bool(text) and words <= 50 and questions <= 1 and not banned and \
+            (must is None or re.search(must, text, re.I) is not None)
+        return ok, f"{words} words, {questions} ?, banned={banned}: {text!r}"
+    return check
+
+
 PERSONAS = [
     Persona(
         name="priya",
@@ -1415,6 +1471,23 @@ PERSONAS = [
             ("'what can you do?' covers the main groups", _mei_what),
             ("programme declined, closest thing offered", _mei_decline),
         ],
+    ),
+    Persona(
+        name="outreach",
+        summary="Messages we send first: morning after a short night, quiet 3 days, back from a trip",
+        steps=[
+            _out_setup,
+            _outbound("morning"),
+            advance_days(3),
+            _outbound("quiet"),
+            _outbound("trip_return", "Holiday in Bali"),
+        ],
+        checks=[
+            ("morning after a short night: short, one question, no nagging", _out_ok("morning")),
+            ("quiet 3 days: short, one question, no nagging", _out_ok("quiet")),
+            ("trip_return mentions the trip, short, no nagging", _out_ok("trip_return", r"\bbali\b|\btrip\b")),
+        ],
+        common=False,
     ),
     Persona(
         name="sam",
@@ -1952,6 +2025,157 @@ def _code_note_end(db) -> CheckResult:
     return not wrong, f"wrong: {wrong}"
 
 
+def _code_planner(db) -> CheckResult:
+    """Every planner rule, table-driven, with a fixed clock. No database, no model."""
+    from app.proactive.planner import Facts, NoteFact, next_checkin, plan, slot_at
+    day = datetime(2026, 10, 8)
+    am, pm = day.replace(hour=10, minute=5), day.replace(hour=21, minute=5)
+    yday = day - timedelta(days=1)
+    T = day.date()
+
+    def f(**kw):
+        base = dict(reminders="both", paused_until=None, last_message_at=yday.replace(hour=20),
+                    since=day - timedelta(days=30), logged_today=False)
+        base.update(kw)
+        return Facts(**base)
+
+    def ago(days, hour=9):
+        return (day - timedelta(days=days)).replace(hour=hour)
+
+    sick = lambda d, nid=1: NoteFact(nid, "sick", T - timedelta(days=d), T - timedelta(days=d))
+    trip = lambda a, b: NoteFact(2, "trip", T + timedelta(days=a), T + timedelta(days=b))
+    cases = [
+        # (name, facts, slot, now, expected reason)
+        ("1 off", f(reminders="off"), "morning", am, None),
+        ("1 paused", f(paused_until=T), "morning", am, None),
+        ("1 pause over", f(paused_until=T - timedelta(days=1)), "morning", am, "morning"),
+        ("1 morning-only user at night", f(reminders="morning"), "evening", pm, None),
+        ("2 messaged 2h ago", f(last_message_at=am - timedelta(hours=2)), "morning", am, None),
+        ("2 messaged 3h ago", f(last_message_at=am - timedelta(hours=3)), "morning", am, "morning"),
+        ("3 sick 2 days", f(open_notes=[sick(2)]), "morning", am, "sick"),
+        ("3 sick 2 days, evening", f(open_notes=[sick(2)]), "evening", pm, None),
+        ("3 sick 1 day", f(open_notes=[sick(1)]), "morning", am, None),
+        ("3 sick, already asked", f(open_notes=[sick(3)], sick_checkins_sent={1}), "morning", am, None),
+        ("4 inside a trip", f(open_notes=[trip(-2, 2)]), "morning", am, None),
+        ("4 trip ended yesterday", f(open_notes=[trip(-5, -1)], last_message_at=ago(6)), "morning", am,
+         "trip_return"),
+        ("4 trip ended yesterday, evening", f(open_notes=[trip(-5, -1)]), "evening", pm, "evening"),
+        ("5 quiet 3 days", f(last_message_at=ago(3)), "morning", am, "quiet"),
+        ("5 quiet 3 days, evening", f(last_message_at=ago(3)), "evening", pm, None),
+        ("5 quiet 7 days", f(last_message_at=ago(7)), "morning", am, "quiet"),
+        ("5 quiet 14 days", f(last_message_at=ago(14)), "morning", am, "quiet_last"),
+        ("5 day 5 skips", f(last_message_at=ago(5)), "morning", am, None),
+        ("5 day 15 skips", f(last_message_at=ago(15)), "morning", am, None),
+        ("5 never messaged, joined 3 days ago", f(last_message_at=None, since=ago(3)), "morning", am, "quiet"),
+        ("6 morning, nothing logged", f(), "morning", am, "morning"),
+        ("6 morning, logged", f(logged_today=True), "morning", am, None),
+        ("7 evening", f(), "evening", pm, "evening"),
+        ("7 messaged after 5pm", f(last_message_at=day.replace(hour=17, minute=30)), "evening", pm, None),
+        ("7 last two unanswered", f(last_two_unanswered=True), "evening", pm, None),
+    ]
+    wrong = []
+    for name, facts, slot, now, want in cases:
+        got = plan(facts, slot, now)
+        if (got.reason if got else None) != want:
+            wrong.append(f"{name}: {got.reason if got else None} != {want}")
+    slots = [slot_at(day.replace(hour=h, minute=m)) for h, m in ((9, 59), (10, 0), (10, 59), (11, 0),
+                                                                 (21, 0), (21, 59), (22, 0))]
+    if slots != [None, "morning", "morning", None, "evening", "evening", None]:
+        wrong.append(f"slots {slots}")
+    nxt = [next_checkin(f(), day.replace(hour=14)), next_checkin(f(), day.replace(hour=19)),
+           next_checkin(f(reminders="off"), day.replace(hour=14))]
+    if nxt != [day.replace(hour=21), (day + timedelta(days=1)).replace(hour=10), None]:
+        wrong.append(f"next check-in {nxt}")
+    return not wrong, f"{len(cases)} cases, wrong: {wrong}"
+
+
+def _code_outbound_sender(db) -> CheckResult:
+    """The sender with a fake model and a fake Telegram: one message per user per
+    slot even if run twice, a stale claim marked failed, an over-long message
+    dropped, a 403 turning reminders off, sent text in the next reply's history,
+    sick notes closed after 7 days, and the /reminders command and buttons."""
+    from app.agent.loop import _history
+    from app.db.models import OutboundMessage
+    from app.proactive import sender
+    from app.proactive.facts import close_old_sick_notes
+    from app.telegram.api import TelegramError
+    now = datetime.combine(date.today(), datetime.min.time()).replace(hour=10, minute=5)
+
+    def user(chat, reminders="both"):
+        uid = _onboarded_user(db)
+        u = db.get(User, uid)
+        u.telegram_chat_id, u.reminders, u.consent_given_at = chat, reminders, datetime.utcnow() - timedelta(days=5)
+        db.add(RawMessage(user_id=uid, body="hi", reply_text="hello",
+                          created_at=datetime.utcnow() - timedelta(days=1)))
+        db.commit()
+        return u
+
+    class Api:
+        def __init__(self, fail=None):
+            self.sent, self.fail = [], fail
+
+        def send_message(self, chat_id, text, buttons=None):
+            if self.fail:
+                raise self.fail
+            self.sent.append((chat_id, text))
+
+    wrong = []
+    for u in db.query(User).filter(User.reminders != "off").all():
+        u.reminders = "off"   # only this check's users are in play
+    db.commit()
+    ok_user = user("5550401")
+    api = Api()
+    first = sender.run_once(api, db, now, composer=lambda *a: "Morning. Weight and sleep when you're up, rough is fine.")
+    second = sender.run_once(api, db, now, composer=lambda *a: "Second send")
+    rows = db.query(OutboundMessage).filter(OutboundMessage.user_id == ok_user.user_id).all()
+    if (first, second, len(api.sent), [r.status for r in rows]) != (1, 0, 1, ["sent"]):
+        wrong.append(f"double send: first={first} second={second} rows={[r.status for r in rows]}")
+    m = RawMessage(user_id=ok_user.user_id, body="82.1 slept 6h")
+    db.add(m)
+    db.commit()
+    if not any("You messaged first at" in h["content"] for h in _history(ok_user.user_id, m.id, db)):
+        wrong.append("sent message missing from history")
+
+    ok_user.reminders = "off"
+    long_user = user("5550402")
+    sender.run_once(Api(), db, now, composer=lambda *a: "word " * 60)
+    long_row = db.query(OutboundMessage).filter(OutboundMessage.user_id == long_user.user_id).one()
+    long_user.reminders = "off"
+    blocked = user("5550403")
+    sender.run_once(Api(fail=TelegramError("sendMessage", 403, "Forbidden: bot was blocked")), db, now,
+                    composer=lambda *a: "Morning, numbers when you're up.")
+    db.refresh(blocked)
+    if long_row.status != "dropped" or blocked.reminders != "off":
+        wrong.append(f"long={long_row.status}, blocked reminders={blocked.reminders}")
+
+    stale = OutboundMessage(user_id=ok_user.user_id, local_date=date.today() - timedelta(days=1), slot="evening",
+                            reason="evening", status="claimed", claimed_at=datetime.utcnow() - timedelta(minutes=15))
+    db.add(stale)
+    db.commit()
+    sender.run_once(Api(), db, now.replace(hour=15), composer=lambda *a: "x")
+    db.refresh(stale)
+    if stale.status != "failed":
+        wrong.append(f"stale claim {stale.status}")
+
+    db.add(Note(user_id=ok_user.user_id, text="Down with flu", kind="sick",
+                starts_on=date.today() - timedelta(days=7)))
+    db.commit()
+    if close_old_sick_notes(ok_user.user_id, db, date.today()) != 1:
+        wrong.append("sick note not closed at 7 days")
+
+    chat = "5550404"
+    with _telegram(chat) as t:
+        t.send(_tg_tap(chat, "consent"), db)
+        t.send(_tg_text(chat, "/reminders"), db)
+        status, buttons = t.api.sent[-1][1], t.api.sent[-1][2]
+        t.send(_tg_tap(chat, "remind:pause"), db)
+        paused = _tg_user(db, chat).paused_until
+    if "never" not in status or len([b for row in buttons for b in row]) != 4 or \
+            paused != date.today() + timedelta(days=7):
+        wrong.append(f"/reminders status={status!r}, paused_until={paused}")
+    return not wrong, f"wrong: {wrong}"
+
+
 def _code_mydata_optional(db) -> CheckResult:
     """/mydata leaves out empty optional fields and explains when there are no targets."""
     from app.telegram.mydata import format_mydata
@@ -2261,6 +2485,8 @@ CODE_CHECKS = [
     ("weight change phrase built in code", _code_weight_words),
     ("sports named in a message are added in code", _code_sports),
     ("a reply can't claim a save no tool made", _code_unbacked_save),
+    ("check-in planner: every rule, fixed clock", _code_planner),
+    ("check-in sender: once per slot, stale, dropped, 403, history, /reminders", _code_outbound_sender),
     ("note_end: 7-day trips, one-day events; follow-up defaults to the day after", _code_note_end),
     ("7-day trend phrase, and lead with it when today is the wrong way", _code_trend),
     ("weight steady for 3 weeks flagged once, only for weight goals", _code_steady),
@@ -2334,7 +2560,7 @@ def run_persona(p: Persona) -> list[tuple[str, str, bool, str]]:
     # Replies come from ctx.sent, the values run() returned, never from the DB
     check_ctx = Ctx(user_id=ctx.user_id, db=check_db, marks=ctx.marks, sent=ctx.sent)
     try:
-        for label, fn in p.checks + COMMON_CHECKS:
+        for label, fn in p.checks + (COMMON_CHECKS if p.common else []):
             try:
                 result = fn(check_ctx)
             except Exception as e:
