@@ -24,3 +24,6 @@
   "Thanks for that", "Got it, 34 and female, noted", "Good to know". No stock
   praise, and the "why now" reaction lands well. Style; revisit if it reads
   robotic on a phone.
+- The code-built weight phrase sometimes comes back garbled, though with the
+  right direction (priya: "The 0.5kg bump up 62.6kg is nothing to read into").
+  Style; revisit if it reads wrong on a phone.
