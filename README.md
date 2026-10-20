@@ -67,8 +67,6 @@ What it won't do: suggest calorie or weight targets, give medical advice, push t
 | Which model? | Sonnet 5 for coaching | Same tests on both. Haiku returned an empty reply to the back-surgery case. Sonnet handled it well | A Haiku version that passes the safety personas |
 | Onboarding model | Moved from Haiku 4.5 to Sonnet 5 on 8 Oct | The requirement changed from "cheap" to "a warm first impression". Haiku asked bare questions; Sonnet reacts to the answer (screenshots at the top) | Onboarding cost becoming a real share of spend |
 | Who is it designed for? | Someone with **no** trainer | The first channel was a personal trainer's clients. But if the bot is only safe because a human is checking it, it isn't safe |  |
-| Data store | Postgres, not Google Sheets | v1 used Sheets: one user, rate limits, no isolation between users |  |
-| Interface | Telegram | Nothing to install, and a check-in takes 10 seconds | Users asking for photos or a web view |
 | Privacy | Consent before data, `/delete` wipes everything, Singapore region | Singapore PDPA: keep only what you need. Blocked minors leave nothing behind but a blocked flag |  |
 | Testing | From the full suite on every push to "test what the change could break" | A full run cost ~$0.70. Free code checks always, the safety personas when the prompt changes, the closest personas to the change | A regression that a targeted run missed |
 
