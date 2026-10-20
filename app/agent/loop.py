@@ -1,3 +1,10 @@
+"""The agent loop: one user message in, one reply out. Onboarding offers only
+save_profile; coaching lets the model call up to 4 tools, then reply.
+Design rule: never trust the model's word about what happened. Only the final
+text is sent (drafts written beside tool calls are dropped), a check-in that
+looks unlogged is forced through log_checkin, and a reply that claims a save no
+tool made is sent back once, then replaced with an honest line.
+"""
 import json
 import logging
 import os

@@ -1,3 +1,9 @@
+"""What the model sees each turn: a cached static prompt (coach.md, what Bob can
+do, tool rules, onboarding rules) and a per-turn context block.
+Design rule: the model never does maths or dates. Trends, sleep runs, note
+status, weight-change phrases, local time and the next check-in are worked out
+in code and handed over as facts, with the rule on the line it applies to.
+"""
 import re
 from typing import Optional
 from datetime import date, datetime, time, timedelta, timezone

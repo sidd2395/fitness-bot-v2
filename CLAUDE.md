@@ -22,7 +22,7 @@ A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
   every 3 days, each kind once), stored in `nudges` as they're handed over.
 - `app/agent/prompts/coach.md`: the coach's voice.
 - `app/capabilities.py`: the user-facing copy of what Coach Bob can and can't do
-  (Sid's wording, from docs/drafts/BOB_COPY_DRAFT.md): /help and its four
+  (Sid's wording): /help and its four
   button sections, the end-of-onboarding message and its reminder buttons, the
   command menu, and the prompt's "What you can help with". Change it there only.
 - `app/pricing.py`: price per million tokens for each model (input, output,
@@ -115,7 +115,7 @@ A multi-user agentic fitness coach on Telegram. Built with the raw Anthropic SDK
   reply quoted and your verdict, run cost.
 - Hard-rule checks must pass. No word-matching checks for style; log style
   issues in `KNOWN_QUIRKS.md`.
-- No new features during a fix batch; ideas go in `IDEAS.md`.
+- No new features during a fix batch; ideas go to Sid, and the roadmap is in the README.
 
 ## Current state
 

@@ -30,7 +30,7 @@ UNKNOWN_COMMAND = "I don't know that command. /help lists what I can do."
 
 HELP = help_text()
 
-# /reminders and the end-of-onboarding buttons (copy: docs/drafts/BOB_COPY_DRAFT.md)
+# /reminders and the end-of-onboarding buttons (Sid's copy)
 REMINDERS_STATUS = ("Right now I check in at {when}, only when I haven't heard from you.")
 REMINDERS_WHEN = {"both": "10am and 9pm", "morning": "10am", "off": "never"}
 REMINDERS_BUTTONS = [[("Morning and night", "remind:both"), ("Just mornings", "remind:morning")],

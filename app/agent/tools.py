@@ -1,3 +1,9 @@
+"""The tools the model can call (log_checkin, save_profile, remember,
+resolve_note, get_history, set_reminders): their schemas and handlers.
+Design rule: the model proposes, code decides. Every handler checks ranges,
+converts units and words to numbers, and refuses changes the user's own message
+doesn't back up (_EVIDENCE); no flag the model sets can unlock a protected field.
+"""
 import re
 from datetime import date, datetime, timedelta
 from typing import Optional

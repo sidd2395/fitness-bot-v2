@@ -1,8 +1,8 @@
 """What Coach Bob can and can't do, in the words users see: the one source. /help
 (main text, four buttons and their sections), the end-of-onboarding message,
 the Telegram command menu and the prompt's "What you can help with" are all
-built from it, so they never disagree. The wording is Sid's
-(docs/drafts/BOB_COPY_DRAFT.md); change it here, nowhere else.
+built from it, so they never disagree. The wording is Sid's; change it here,
+nowhere else.
 """
 
 # /help: the main text, then one button per section. Each section is sent as
