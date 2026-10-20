@@ -11,12 +11,11 @@ It's built as an agent: the model decides which tools to call and what to say. C
 - **Product judgment.** Opt-in check-ins where code decides when to message, scope cuts, and test cost cut from $0.70 to $0.16 a run.
 
 <p>
-  <img src="docs/images/onboarding-after.jpg" width="260" alt="Onboarding">
-  <img src="docs/images/checkin.jpg" width="260" alt="A check-in">
-  <img src="docs/images/summary.png" width="260" alt="/summary">
+  <img src="docs/images/onboarding-before.png" width="260" alt="Onboarding before the voice rewrite"> <img src="docs/images/onboarding-after.jpg" width="260" alt="Onboarding after the voice rewrite"><br>
+  <em>Onboarding, before and after the voice rewrite: Bob now reacts to why you started</em><br><br>
+  <img src="docs/images/checkin.jpg" width="260" alt="A check-in"> <img src="docs/images/summary.png" width="260" alt="/summary"><br>
+  <em>A check-in: works around an injury the user mentioned in onboarding. /summary, built entirely in code.</em>
 </p>
-
-*Left: onboarding reacts to your answer before the next question. Middle: a plain-language check-in, worked around the back injury. Right: `/summary`, two weeks laid out for a phone, ready to forward to a trainer.*
 
 **Contents:** [The problem](#the-problem) · [What it does](#what-it-does) · [Key product decisions](#key-product-decisions) · [How the agent works](#how-the-agent-works) · [How I tested it](#how-i-tested-it) · [What the tests changed](#what-the-tests-changed) · [Numbers so far](#numbers-so-far) · [Roadmap](#roadmap) · [What I learned](#what-i-learned) · [Running it locally](#running-it-locally)
 
@@ -66,7 +65,7 @@ What it won't do: suggest calorie or weight targets, give medical advice, push t
 | What does the model own? | **Judgment only.** Code owns maths, dates, counts, safety and anything saved | Every time the model did arithmetic or dating in testing, it eventually got it wrong. See [What the tests changed](#what-the-tests-changed) | Nothing so far. It held up across every test run |
 | Who decides when to message first? | Code decides whether, the model writes what | A missed or doubled check-in is a product bug, not a tone problem. The rules are testable with a fake clock | Users asking for check-ins at their own times |
 | Which model? | Sonnet 5 for coaching | Same tests on both. Haiku returned an empty reply to the back-surgery case. Sonnet handled it well | A Haiku version that passes the safety personas |
-| Onboarding model | Moved from Haiku 4.5 to Sonnet 5 on 8 Oct | The requirement changed from "cheap" to "a warm first impression". Haiku asked bare questions ([before](docs/images/onboarding-before.png)); Sonnet reacts to the answer | Onboarding cost becoming a real share of spend |
+| Onboarding model | Moved from Haiku 4.5 to Sonnet 5 on 8 Oct | The requirement changed from "cheap" to "a warm first impression". Haiku asked bare questions; Sonnet reacts to the answer (screenshots at the top) | Onboarding cost becoming a real share of spend |
 | Who is it designed for? | Someone with **no** trainer | The first channel was a personal trainer's clients. But if the bot is only safe because a human is checking it, it isn't safe |  |
 | Data store | Postgres, not Google Sheets | v1 used Sheets: one user, rate limits, no isolation between users |  |
 | Interface | Telegram | Nothing to install, and a check-in takes 10 seconds | Users asking for photos or a web view |
@@ -118,8 +117,6 @@ flowchart LR
 | 7 | Evening, no message since 5pm, last two not both unanswered | "evening" |
 
 Each send is **claimed before the model is called**: one row per user, day and slot, with a unique key, so a restart can't double-send. A stale claim is marked failed, never retried. The model writes one message with no tools, and code **drops it** if it's empty, over 50 words, or has more than one question. No canned fallback. Commands and button taps don't count as messaging.
-
-**Cost.** Every API call logs model, tokens, cost and latency (`event=usage` in the logs). About 90% of input tokens are served from the prompt cache.
 
 ## How I tested it
 
@@ -186,7 +183,7 @@ In my first days using it on my own phone, the coach told me my sleep and traini
 | Cost per coaching message | ~US$0.012 (Sonnet 5, cached prompt, measured 8 Oct) |
 | Cost per check-in Bob sends first | ~US$0.003 (one Sonnet call, no tools, cached prompt) |
 | Cost per onboarding | US$0.019 on Haiku 4.5 (measured). On Sonnet 5 since 8 Oct: estimated ~US$0.04 to 0.05, not yet measured on its own |
-| Prompt cache hit rate | ~88 to 90% |
+| Prompt cache hit rate | ~88 to 90% (every call logs model, tokens, cost and latency) |
 | Estimated running cost, 10 users × 5 messages a day | ~US$0.66 a day, check-ins included |
 | Test run cost | Full suite ~US$0.67 to 0.70 (7 Oct). Targeted run US$0.16 (8 Oct) |
 | Test suite | 17 personas, plus 36 code-level checks |
