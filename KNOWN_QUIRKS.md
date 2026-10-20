@@ -27,3 +27,7 @@
 - The code-built weight phrase sometimes comes back garbled, though with the
   right direction (priya: "The 0.5kg bump up 62.6kg is nothing to read into").
   Style; revisit if it reads wrong on a phone.
+- Stock praise still slips into coaching replies ('a solid baseline to start
+  from', 'Good first check-in, by the way') although coach.md bans stock
+  openers. Seen in real use on 20 Oct. Next fix: an LLM judge check for
+  templated phrasing.
