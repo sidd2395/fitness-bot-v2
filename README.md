@@ -4,6 +4,8 @@ An AI fitness coach that lives in Telegram. You text it the way you'd text a fri
 
 It's built as an agent: the model decides which tools to call and what to say. Code enforces everything that has to be correct or safe.
 
+**Status:** live on Railway (Singapore) since 6 Oct 2026, invite only. Bob messages first (10am and 9pm check-ins, opt-in) since 8 Oct. The test suite and run log here are the start of an eval harness; an LLM judge for tone is next.
+
 ## What this shows
 
 - **An agent with real guardrails.** The model picks the tools and the words. Code owns the maths, the dates, what gets saved and safety.
@@ -18,8 +20,6 @@ It's built as an agent: the model decides which tools to call and what to say. C
 </p>
 
 **Contents:** [The problem](#the-problem) · [What it does](#what-it-does) · [Key product decisions](#key-product-decisions) · [How the agent works](#how-the-agent-works) · [How I tested it](#how-i-tested-it) · [What the tests changed](#what-the-tests-changed) · [Numbers so far](#numbers-so-far) · [Roadmap](#roadmap) · [What I learned](#what-i-learned) · [Running it locally](#running-it-locally)
-
-**Status:** live on Railway (Singapore) since 6 Oct 2026, invite only. Bob messages first (10am and 9pm check-ins, opt-in) since 8 Oct. Build 1 of 2 in my AI product portfolio. Build 2 is the eval harness that measures it.
 
 ---
 
@@ -38,7 +38,7 @@ It's built as an agent: the model decides which tools to call and what to say. C
 | Safety | Depends on the prompt that day | Key limits enforced in code: under-18 block, impossible numbers rejected, protected profile fields |
 | A record a trainer can read | No | `/summary` and `/mydata` |
 
-**For me:** I'm an AI product manager. Job descriptions now ask for something I couldn't show in public: "have you built an agent and shown it works?" This project is the "built an agent" half. The eval harness is the "shown it works" half.
+**Why I built it:** I build AI products for a living. This is one I built end to end, in public: the agent design, the guardrails, and the evals that decided what to change.
 
 ## What it does
 
@@ -143,9 +143,9 @@ The test suite is a set of **17 scripted personas** plus free code-level checks.
 | Run | Checks passed | What it caught |
 | --- | --- | --- |
 | 25 Sep | 103 / 104 | A test stricter than the product. Settled the correction rule |
-| Run 2 | 152 / 160 | Onboarding logging a check-in; safety point after the milestone; a mislabelled "streak" |
-| Run 3 | 172 / 173 | Duplicate safety warning; "down" when weight went up |
-| Run 5 | 187 / 187 | A perfect score, but a short-sleep count was wrong. Found by reading the transcript |
+| Late Sep | 152 / 160 | Onboarding logging a check-in; safety point after the milestone; a mislabelled "streak" |
+| Late Sep | 172 / 173 | Duplicate safety warning; "down" when weight went up |
+| Late Sep | 187 / 187 | A perfect score, but a short-sleep count was wrong. Found by reading the transcript |
 | 6 Oct | 290 / 293 | New checks for the real-use fixes |
 | 6 Oct, deploy gate | 314 / 315 | One known quirk, accepted |
 | 7 Oct | 311 / 315 | First run logged in `eval_runs.csv`. The bot claimed a save it never made |
@@ -153,7 +153,7 @@ The test suite is a set of **17 scripted personas** plus free code-level checks.
 | 7 Oct | 317 / 317 | Follow-up dates defaulted in code |
 | 8 Oct, targeted | 115 / 115 | The check-ins release, for $0.16 instead of ~$0.70 |
 
-**A perfect score lied to me twice.** One targeted run passed 58 of 58 while the model had overwritten a start weight using a "user confirmed" flag it made up. Run 5 passed 187 of 187 with a wrong sleep count. Since then I read transcripts alongside every score.
+**A perfect score lied to me twice.** One targeted run passed 58 of 58 while the model had overwritten a start weight using a "user confirmed" flag it made up. A late-September run passed 187 of 187 with a wrong sleep count. Since then I read transcripts alongside every score.
 
 ## What the tests changed
 
@@ -243,4 +243,4 @@ Deploying to Railway is covered in `DEPLOY.md`.
 
 ---
 
-Built by Sid, an AI product manager in Singapore. I designed the product, the tools, the guardrails and the tests. Claude Code wrote most of the plumbing with me.
+Built by Sid, an AI product manager in Singapore. I designed the product, the tools, the guardrails and the tests. Claude Code wrote most of the plumbing with me. Want to try Bob? It's invite only. Message me on LinkedIn.
